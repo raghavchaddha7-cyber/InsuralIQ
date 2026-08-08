@@ -685,7 +685,7 @@ async function renderBriefing() {
         <div class="card-title">${esc(a.title)}</div>
         <div class="card-dek">${esc(a.dek)}</div>
         <div class="card-footer">
-          <span class="card-source">via ${esc(a.source)}</span>
+          <span class="card-source">InsuralIQ Summary</span>
           <span class="read-more">Read →</span>
         </div>
       </button>`;
@@ -733,7 +733,7 @@ function renderArticle(article) {
           ${esc(article.title)}
         </h1>
         <div style="font:400 12.5px var(--font);color:var(--sub);margin:10px 0 18px">
-          via ${esc(article.source)} · ${esc(article.time)}
+          InsuralIQ Summary · ${esc(article.time)}
         </div>
 
         <div class="article-content">
@@ -750,11 +750,9 @@ function renderArticle(article) {
           }).join('')}
         </div>` : ''}
 
-        <a href="${esc(article.link)}" target="_blank" rel="noopener" class="learn-card" style="text-decoration:none;margin-top:8px">
-          <div class="lc-overline" style="color:var(--teal)">Source article</div>
-          <div class="lc-title">Read original on ${esc(article.source)} ↗</div>
-          <div class="lc-sub">Opens in a new tab</div>
-        </a>
+        ${article.link && article.link !== '#' ? `<a href="${esc(article.link)}" target="_blank" rel="noopener" style="display:inline-block;font:500 12px var(--font);color:var(--teal);text-decoration:none;margin-top:8px;padding:8px 14px;border:1px solid var(--line);border-radius:8px">
+          Read full article ↗
+        </a>` : ''}
 
         <div style="display:flex;gap:10px;margin-top:16px">
           <button class="action-btn ${isSaved ? 'saved' : ''}" onclick="toggleSave(this, '${esc(article.title)}')">${isSaved ? '♥ Saved' : '♡ Save'}</button>
