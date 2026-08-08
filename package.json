@@ -1,0 +1,22 @@
+{
+  "name": "insuraiq",
+  "version": "1.0.0",
+  "description": "InsuralIQ — Insurance knowledge platform with live news aggregation",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": ["insurance", "BFSI", "IRDAI", "news", "education"],
+  "author": "Raghav Chaddha — BIMTECH PGDM IBM",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "node-cron": "^4.6.0",
+    "rss-parser": "^3.13.0"
+  }
+}
