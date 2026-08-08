@@ -1,6 +1,7 @@
 // ── InsuralIQ News Backend ──────────────────────────────────────
-// Aggregates Indian insurance & BFSI news from multiple RSS feeds,
-// auto-tags articles, and serves them as a clean JSON API.
+// Aggregates Indian insurance & BFSI news from NewsData.io API
+// (primary) + RSS feeds (fallback), auto-tags articles, and
+// serves them as a clean JSON API.
 // ────────────────────────────────────────────────────────────────
 
 const express = require("express");
@@ -12,14 +13,26 @@ const app = express();
 const parser = new Parser({
   timeout: 10000,
   headers: {
-    "User-Agent": "InsuralIQ/1.0 (Insurance Knowledge Platform)",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
   },
 });
 
 app.use(cors());
 
-// ── Feed Sources ────────────────────────────────────────────────
-// Each source has a URL, a default tag, and whether it's India-focused
+// ── NewsData.io API Configuration ──────────────────────────────
+// Free tier: 200 credits/day, 10 results per request
+// Sign up at https://newsdata.io to get your API key
+const NEWSDATA_API_KEY = process.env.NEWSDATA_API_KEY || "";
+
+// Search queries to rotate through (uses 1 credit each)
+const NEWSDATA_QUERIES = [
+  { q: "insurance India", label: "Insurance India" },
+  { q: "IRDAI OR health insurance OR life insurance", label: "IRDAI + Health + Life" },
+  { q: "BFSI OR banking OR fintech India", label: "BFSI India" },
+  { q: "motor insurance OR crop insurance OR insurtech", label: "General + InsurTech" },
+];
+
+// ── RSS Feed Sources (fallback) ────────────────────────────────
 const FEEDS = [
   {
     url: "https://economictimes.indiatimes.com/industry/banking/finance/insure/rssfeeds/13358277.cms",
@@ -240,8 +253,70 @@ let newsCache = [];
 let lastFetchTime = null;
 let fetchErrors = [];
 let usingSeed = false;
+let newsSource = "none"; // "api", "rss", "seed"
 
-async function fetchAllFeeds() {
+// ── NewsData.io API Fetch ──────────────────────────────────────
+async function fetchFromNewsDataAPI() {
+  if (!NEWSDATA_API_KEY) return [];
+
+  const results = [];
+  const https = require("https");
+
+  for (const query of NEWSDATA_QUERIES) {
+    try {
+      const url = `https://newsdata.io/api/1/latest?apikey=${NEWSDATA_API_KEY}&q=${encodeURIComponent(query.q)}&country=in&language=en&size=10`;
+
+      const data = await new Promise((resolve, reject) => {
+        const req = https.get(url, { timeout: 15000 }, (res) => {
+          let body = "";
+          res.on("data", (chunk) => (body += chunk));
+          res.on("end", () => {
+            try {
+              resolve(JSON.parse(body));
+            } catch (e) {
+              reject(new Error("Invalid JSON response"));
+            }
+          });
+        });
+        req.on("error", reject);
+        req.on("timeout", () => { req.destroy(); reject(new Error("Timeout")); });
+      });
+
+      if (data.status === "success" && data.results) {
+        for (const item of data.results) {
+          const title = item.title || "";
+          const description = item.description || "";
+          const content = item.content || item.description || "";
+          const { tag, tagColor } = assignTag(title, description, "Insurance");
+
+          results.push({
+            id: (item.article_id || Buffer.from(title).toString("base64").slice(0, 20)),
+            title: title,
+            dek: truncate(description, 160),
+            fullContent: stripHtml(content) || stripHtml(description),
+            link: item.link || "",
+            pubDate: item.pubDate || new Date().toISOString(),
+            time: timeAgo(item.pubDate || new Date()),
+            source: item.source_name || item.source_id || "News",
+            tag,
+            tagColor,
+            india: true,
+            concepts: detectConcepts(`${title} ${content || description}`),
+          });
+        }
+        console.log(`  ✅ API query "${query.label}": ${data.results.length} articles`);
+      } else if (data.status === "error") {
+        console.log(`  ⚠ API query "${query.label}": ${data.results?.message || "Error"}`);
+      }
+    } catch (err) {
+      console.log(`  ⚠ API query "${query.label}": ${err.message}`);
+    }
+  }
+  return results;
+}
+
+// ── RSS Feed Fetch ─────────────────────────────────────────────
+async function fetchFromRSSFeeds() {
   const results = [];
   const errors = [];
 
@@ -280,12 +355,50 @@ async function fetchAllFeeds() {
     })
   );
 
+  return { results, errors };
+}
+
+// ── Main Fetch (API first → RSS fallback → Seed fallback) ─────
+async function fetchAllFeeds() {
+  const timestamp = new Date().toLocaleTimeString();
+  console.log(`\n[${timestamp}] Fetching news...`);
+
+  let allResults = [];
+  let errors = [];
+
+  // Step 1: Try NewsData.io API (always fresh, today's news)
+  if (NEWSDATA_API_KEY) {
+    console.log("  📡 Trying NewsData.io API...");
+    const apiResults = await fetchFromNewsDataAPI();
+    if (apiResults.length > 0) {
+      allResults = apiResults;
+      newsSource = "api";
+      console.log(`  ✅ Got ${apiResults.length} articles from API`);
+    }
+  }
+
+  // Step 2: Also try RSS feeds (may add more articles)
+  console.log("  📡 Trying RSS feeds...");
+  const { results: rssResults, errors: rssErrors } = await fetchFromRSSFeeds();
+  errors = rssErrors;
+
+  if (rssResults.length > 0) {
+    allResults = [...allResults, ...rssResults];
+    if (newsSource !== "api") newsSource = "rss";
+    console.log(`  ✅ Got ${rssResults.length} articles from RSS`);
+  }
+
+  if (rssErrors.length > 0) {
+    console.log(`  ⚠ ${rssErrors.length} RSS feeds failed`);
+    rssErrors.forEach((e) => console.log(`    → ${e.source}: ${e.error}`));
+  }
+
   // Sort by date, newest first
-  results.sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate));
+  allResults.sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate));
 
   // Deduplicate by title similarity
   const seen = new Set();
-  const deduped = results.filter((item) => {
+  const deduped = allResults.filter((item) => {
     const key = item.title.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 40);
     if (seen.has(key)) return false;
     seen.add(key);
@@ -296,22 +409,18 @@ async function fetchAllFeeds() {
   lastFetchTime = new Date().toISOString();
   fetchErrors = errors;
 
-  // If no feeds worked, use seed data as fallback
-  if (deduped.length === 0 && errors.length > 0) {
+  // Step 3: If nothing worked, use seed data
+  if (deduped.length === 0) {
     newsCache = [...SEED_ARTICLES];
     usingSeed = true;
-    console.log(
-      `[${new Date().toLocaleTimeString()}] All ${errors.length} feeds failed — using ${SEED_ARTICLES.length} seed articles`
-    );
-    errors.forEach((e) => console.log(`  ⚠ ${e.source}: ${e.error}`));
+    newsSource = "seed";
+    console.log(`  📦 No live news — using ${SEED_ARTICLES.length} seed articles`);
   } else {
     usingSeed = false;
-    console.log(
-      `[${new Date().toLocaleTimeString()}] Fetched ${deduped.length} articles from ${FEEDS.length - errors.length}/${FEEDS.length} feeds`
-    );
-    if (errors.length) {
-      errors.forEach((e) => console.log(`  ⚠ ${e.source}: ${e.error}`));
-    }
+    // Count today's articles
+    const today = new Date().toDateString();
+    const todayCount = deduped.filter(a => new Date(a.pubDate).toDateString() === today).length;
+    console.log(`  📊 Total: ${deduped.length} articles (${todayCount} from today)`);
   }
 }
 
@@ -325,10 +434,30 @@ async function fetchAllFeeds() {
 //   ?offset=0           — pagination offset
 //   ?search=surrender   — full-text search in title + dek
 //   ?concepts=true      — only articles with detected concepts
+//   ?fresh=true         — only today's + yesterday's articles (default: true)
+//   ?days=1             — articles from last N days (default: 2)
 app.get("/api/news", (req, res) => {
   let items = [...newsCache];
 
-  // Filters
+  // Fresh filter: show only recent articles by default
+  const freshMode = req.query.fresh !== "false"; // default true
+  const daysBack = parseInt(req.query.days) || 2; // default: today + yesterday
+
+  if (freshMode && !usingSeed) {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - daysBack);
+    cutoff.setHours(0, 0, 0, 0);
+    const freshItems = items.filter((i) => new Date(i.pubDate) >= cutoff);
+
+    // If we have fresh articles, use them; otherwise show most recent 15
+    if (freshItems.length > 0) {
+      items = freshItems;
+    } else {
+      items = items.slice(0, 15); // show most recent even if older
+    }
+  }
+
+  // Tag filter
   if (req.query.tag) {
     items = items.filter((i) => i.tag.toLowerCase() === req.query.tag.toLowerCase());
   }
@@ -350,12 +479,16 @@ app.get("/api/news", (req, res) => {
   const offset = parseInt(req.query.offset) || 0;
   items = items.slice(offset, offset + limit);
 
+  // Recalculate "time" to keep it fresh on each request
+  items = items.map((i) => ({ ...i, time: timeAgo(i.pubDate) }));
+
   res.json({
     ok: true,
     total,
     limit,
     offset,
     lastFetched: lastFetchTime,
+    source: newsSource,
     articles: items,
   });
 });
@@ -377,13 +510,18 @@ app.get("/api/tags", (req, res) => {
 
 // GET /api/status — health check
 app.get("/api/status", (req, res) => {
+  const today = new Date().toDateString();
+  const todayCount = newsCache.filter(a => new Date(a.pubDate).toDateString() === today).length;
   res.json({
     ok: true,
     articleCount: newsCache.length,
+    todayCount,
     lastFetched: lastFetchTime,
+    newsSource,
     feedCount: FEEDS.length,
     feedErrors: fetchErrors.length,
     usingSeedData: usingSeed,
+    hasAPIKey: !!NEWSDATA_API_KEY,
     errors: fetchErrors,
   });
 });
@@ -402,11 +540,14 @@ app.listen(PORT, async () => {
   console.log(`  │   GET /api/news     — news feed        │`);
   console.log(`  │   GET /api/tags     — tag breakdown    │`);
   console.log(`  │   GET /api/status   — health check     │`);
-  console.log(`  └──────────────────────────────────────┘\n`);
+  console.log(`  └──────────────────────────────────────┘`);
+  console.log(`  📡 NewsData.io API key: ${NEWSDATA_API_KEY ? "✅ Configured" : "❌ Not set (using RSS only)"}`);
+  console.log(`  💡 Set NEWSDATA_API_KEY env var for live daily news\n`);
 
   // Initial fetch
   await fetchAllFeeds();
 
-  // Refresh every 15 minutes
-  cron.schedule("*/15 * * * *", fetchAllFeeds);
+  // Refresh every 30 minutes (conserves API credits — 200/day free)
+  // 48 requests/day (4 queries × 30-min intervals × ~12 active hours)
+  cron.schedule("*/30 * * * *", fetchAllFeeds);
 });
