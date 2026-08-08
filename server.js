@@ -24,12 +24,13 @@ app.use(cors());
 // Sign up at https://newsdata.io to get your API key
 const NEWSDATA_API_KEY = process.env.NEWSDATA_API_KEY || "";
 
-// Search queries to rotate through (uses 1 credit each)
+// Search queries — strictly insurance-focused (uses 1 credit each)
 const NEWSDATA_QUERIES = [
-  { q: "insurance India", label: "Insurance India" },
-  { q: "IRDAI OR health insurance OR life insurance", label: "IRDAI + Health + Life" },
-  { q: "BFSI OR banking OR fintech India", label: "BFSI India" },
-  { q: "motor insurance OR crop insurance OR insurtech", label: "General + InsurTech" },
+  { q: "insurance IRDAI India", label: "Insurance + IRDAI" },
+  { q: "life insurance OR health insurance India", label: "Life + Health Insurance" },
+  { q: "motor insurance OR crop insurance OR reinsurance India", label: "Motor + Crop + Reinsurance" },
+  { q: "insurtech OR insurance company OR insurance policy India", label: "InsurTech + Companies" },
+  { q: "LIC OR HDFC Life OR ICICI Prudential OR Star Health insurance", label: "Major Insurers" },
 ];
 
 // ── RSS Feed Sources (fallback) ────────────────────────────────
@@ -163,6 +164,51 @@ function detectConcepts(text) {
   return KNOWN_CONCEPTS.filter((c) => lower.includes(c));
 }
 
+// ── Relevance Gate ─────────────────────────────────────────────
+// Only allow articles that are genuinely about insurance/BFSI
+// This prevents political news, cricket scores, etc. from appearing
+const INSURANCE_KEYWORDS = [
+  "insurance", "insurer", "insured", "insuring",
+  "irdai", "policyholder", "policy holder", "claim settlement",
+  "premium", "underwriting", "underwriter", "actuary", "actuarial",
+  "life cover", "health cover", "motor cover", "term plan",
+  "endowment", "ulip", "annuity", "pension plan",
+  "reinsurance", "reinsurer", "lic ", "lic'", "gic re",
+  "sum assured", "sum insured", "death benefit", "maturity benefit",
+  "surrender value", "paid-up", "cashless", "mediclaim",
+  "third party", "own damage", "comprehensive cover",
+  "solvency", "claim ratio", "loss ratio", "combined ratio",
+  "bancassurance", "bima sugam", "ayushman", "pmjay", "pmfby",
+  "crop insurance", "fire insurance", "marine insurance",
+  "cyber insurance", "travel insurance", "home insurance",
+  "liability insurance", "product liability",
+  "general insurance", "life insurance", "health insurance",
+  "motor insurance", "vehicle insurance",
+  "insurance sector", "insurance industry", "insurance market",
+  "insurance company", "insurance business", "insurance regulation",
+  "new india assurance", "united india", "oriental insurance",
+  "star health", "care health", "niva bupa", "max life",
+  "hdfc life", "icici prudential", "sbi life", "bajaj allianz",
+  "tata aia", "kotak life", "hdfc ergo", "icici lombard",
+  "digit insurance", "acko", "policybazaar", "go digit",
+  "insurance penetration", "insurance density",
+  "risk cover", "risk management", "risk transfer",
+  "insurance agent", "insurance broker", "insurance intermediary",
+  "fdi in insurance", "insurance ipo", "insurtech",
+  "takaful", "microinsurance", "group insurance",
+];
+
+function isInsuranceRelevant(title, description, content) {
+  const text = `${title} ${description} ${content}`.toLowerCase();
+  // Count how many insurance keywords appear
+  let matchCount = 0;
+  for (const kw of INSURANCE_KEYWORDS) {
+    if (text.includes(kw)) matchCount++;
+  }
+  // Need at least 2 insurance keyword matches to be considered relevant
+  return matchCount >= 2;
+}
+
 // ── Tag Assignment ──────────────────────────────────────────────
 function assignTag(title, description, defaultTag) {
   const text = `${title} ${description}`.toLowerCase();
@@ -210,6 +256,31 @@ function truncate(text, maxLen = 160) {
   const lastSpace = cut.lastIndexOf(" ");
   const breakAt = lastPeriod > maxLen * 0.5 ? lastPeriod + 1 : lastSpace;
   return cut.slice(0, breakAt).trim() + "…";
+}
+
+// ── Clean & Enhance Summary ────────────────────────────────────
+// Removes junk patterns from API/RSS content to create clean summaries
+function cleanSummary(text) {
+  if (!text) return "";
+  let clean = stripHtml(text);
+  // Remove common junk patterns from news APIs
+  clean = clean.replace(/\(Also read:.*?\)/gi, "");
+  clean = clean.replace(/Also read:.*?$/gim, "");
+  clean = clean.replace(/READ MORE:.*?$/gim, "");
+  clean = clean.replace(/ALSO READ.*?$/gim, "");
+  clean = clean.replace(/Click here to.*?$/gim, "");
+  clean = clean.replace(/Subscribe to.*?$/gim, "");
+  clean = clean.replace(/Follow us on.*?$/gim, "");
+  clean = clean.replace(/Sign up for.*?$/gim, "");
+  clean = clean.replace(/Download the.*?app.*?$/gim, "");
+  clean = clean.replace(/\[.*?\]/g, ""); // Remove [Reuters], [PTI] etc
+  clean = clean.replace(/\(Reuters\)/gi, "");
+  clean = clean.replace(/\(PTI\)/gi, "");
+  clean = clean.replace(/\(IANS\)/gi, "");
+  clean = clean.replace(/\(ANI\)/gi, "");
+  // Clean up whitespace
+  clean = clean.replace(/\s+/g, " ").trim();
+  return clean;
 }
 
 // ── Extract full content from RSS item ─────────────────────────
@@ -283,28 +354,38 @@ async function fetchFromNewsDataAPI() {
       });
 
       if (data.status === "success" && data.results) {
+        let accepted = 0, rejected = 0;
         for (const item of data.results) {
           const title = item.title || "";
           const description = item.description || "";
           const content = item.content || item.description || "";
+
+          // ── RELEVANCE GATE: reject non-insurance articles ──
+          if (!isInsuranceRelevant(title, description, content)) {
+            rejected++;
+            continue;
+          }
+
           const { tag, tagColor } = assignTag(title, description, "Insurance");
 
+          const cleanContent = cleanSummary(content) || cleanSummary(description);
           results.push({
             id: (item.article_id || Buffer.from(title).toString("base64").slice(0, 20)),
             title: title,
-            dek: truncate(description, 160),
-            fullContent: stripHtml(content) || stripHtml(description),
+            dek: truncate(cleanSummary(description), 160),
+            fullContent: cleanContent,
             link: item.link || "",
             pubDate: item.pubDate || new Date().toISOString(),
             time: timeAgo(item.pubDate || new Date()),
-            source: item.source_name || item.source_id || "News",
+            source: "InsuralIQ",
             tag,
             tagColor,
             india: true,
-            concepts: detectConcepts(`${title} ${content || description}`),
+            concepts: detectConcepts(`${title} ${cleanContent}`),
           });
+          accepted++;
         }
-        console.log(`  ✅ API query "${query.label}": ${data.results.length} articles`);
+        console.log(`  ✅ API query "${query.label}": ${accepted} accepted, ${rejected} rejected as irrelevant`);
       } else if (data.status === "error") {
         console.log(`  ⚠ API query "${query.label}": ${data.results?.message || "Error"}`);
       }
@@ -324,31 +405,31 @@ async function fetchFromRSSFeeds() {
     FEEDS.map(async (feed) => {
       try {
         const parsed = await parser.parseURL(feed.url);
-        const items = (parsed.items || []).slice(0, 15).map((item) => {
-          const { tag, tagColor } = assignTag(
-            item.title || "",
-            item.contentSnippet || item.content || "",
-            feed.defaultTag
-          );
+        const items = (parsed.items || []).slice(0, 15);
+        for (const item of items) {
+          const title = item.title || "Untitled";
+          const snippet = item.contentSnippet || item.content || "";
           const fullContent = extractFullContent(item);
-          return {
-            id: Buffer.from(item.link || item.title || "").toString("base64").slice(0, 20),
-            title: item.title || "Untitled",
-            dek: truncate(item.contentSnippet || item.content || ""),
-            fullContent: fullContent || truncate(item.contentSnippet || item.content || "", 800),
+
+          // ── RELEVANCE GATE: reject non-insurance articles ──
+          if (!isInsuranceRelevant(title, snippet, fullContent)) continue;
+
+          const { tag, tagColor } = assignTag(title, snippet, feed.defaultTag);
+          results.push({
+            id: Buffer.from(item.link || title).toString("base64").slice(0, 20),
+            title: title,
+            dek: truncate(snippet),
+            fullContent: fullContent || truncate(snippet, 800),
             link: item.link || "",
             pubDate: item.pubDate || item.isoDate || new Date().toISOString(),
             time: timeAgo(item.pubDate || item.isoDate || new Date()),
-            source: feed.source,
+            source: "InsuralIQ",
             tag,
             tagColor,
             india: feed.india,
-            concepts: detectConcepts(
-              `${item.title} ${fullContent || item.contentSnippet || item.content || ""}`
-            ),
-          };
-        });
-        results.push(...items);
+            concepts: detectConcepts(`${title} ${fullContent || snippet}`),
+          });
+        }
       } catch (err) {
         errors.push({ source: feed.source, url: feed.url, error: err.message });
       }
