@@ -30,7 +30,9 @@ const NEWSDATA_QUERIES = [
   { q: "life insurance OR health insurance India", label: "Life + Health Insurance" },
   { q: "motor insurance OR crop insurance OR reinsurance India", label: "Motor + Crop + Reinsurance" },
   { q: "insurtech OR insurance company OR insurance policy India", label: "InsurTech + Companies" },
-  { q: "LIC OR HDFC Life OR ICICI Prudential OR Star Health insurance", label: "Major Insurers" },
+  { q: "LIC OR \"HDFC Life\" OR \"ICICI Prudential\" OR \"Star Health\" insurance", label: "Major Insurers" },
+  { q: "insurance acquisition OR insurance FDI OR insurer merger India", label: "M&A + FDI" },
+  { q: "\"Bajaj Allianz\" OR \"SBI Life\" OR \"IndiaFirst\" OR \"Digit\" insurance", label: "More Insurers" },
 ];
 
 // ── RSS Feed Sources (fallback) ────────────────────────────────
@@ -319,6 +321,30 @@ const SEED_ARTICLES = [
 // Add IDs to seed data
 SEED_ARTICLES.forEach((a, i) => { a.id = `seed_${i}`; a.pubDate = new Date(Date.now() - i * 3600000 * 12).toISOString(); });
 
+// ── Curated Articles (added by admin) ─────────────────────────
+// These are high-priority articles added manually by the editor
+// They always appear and are never filtered out
+let curatedArticles = [
+  {
+    id: "curated_bnp_paribas_2026",
+    title: "BNP Paribas Cardif to acquire 26% stake in IndiaFirst Life Insurance",
+    dek: "French insurance giant BNP Paribas Cardif agreed to acquire ~26% of IndiaFirst Life from Warburg Pincus, marking a significant FDI move under India's liberalised ownership regime.",
+    fullContent: "BNP Paribas Cardif, the insurance arm of French banking giant BNP Paribas, agreed on 24 July 2026 to acquire approximately 26% of IndiaFirst Life Insurance from private equity firm Warburg Pincus, subject to regulatory approvals from IRDAI and CCI. Post-deal, the shareholding structure will see Bank of Baroda holding ~65%, BNP Paribas Cardif ~26%, and Union Bank of India ~9%.\n\nThis acquisition is a strong early example of India's liberalised foreign ownership regime in insurance translating into actual strategic foreign insurer participation. With the government having raised the FDI cap to 100%, global insurers are actively exploring deeper involvement in the Indian market, and BNP Paribas Cardif's move signals confidence in India's insurance growth story.\n\nThe deal also strengthens the bancassurance channel — Bank of Baroda's vast branch network of 8,200+ branches provides a powerful distribution platform for IndiaFirst Life's products. BNP Paribas Cardif brings global insurance expertise, digital capabilities, and product innovation experience from operating in over 30 countries.\n\nFor the Indian insurance sector, this transaction highlights the growing attractiveness of mid-sized life insurers as acquisition targets. IndiaFirst Life, with its established bancassurance relationships and growing premium base, offers BNP Paribas a ready platform to scale its India operations without building from scratch.",
+    link: "#",
+    pubDate: new Date().toISOString(),
+    time: "Today",
+    source: "InsuralIQ",
+    tag: "Market",
+    tagColor: "#0A5A62",
+    india: true,
+    curated: true,
+    concepts: ["premium", "bancassurance", "fdi in insurance"],
+  },
+];
+
+// Admin password — set via environment variable for security
+const ADMIN_KEY = process.env.ADMIN_KEY || "insuraiq2026";
+
 // ── News Store ──────────────────────────────────────────────────
 let newsCache = [];
 let lastFetchTime = null;
@@ -486,7 +512,8 @@ async function fetchAllFeeds() {
     return true;
   });
 
-  newsCache = deduped;
+  // Merge curated articles (always on top, never filtered out)
+  newsCache = [...curatedArticles, ...deduped];
   lastFetchTime = new Date().toISOString();
   fetchErrors = errors;
 
@@ -605,6 +632,235 @@ app.get("/api/status", (req, res) => {
     hasAPIKey: !!NEWSDATA_API_KEY,
     errors: fetchErrors,
   });
+});
+
+// ── Admin API: Curated Articles ───────────────────────────────
+app.use(express.json());
+
+// POST /api/admin/article — add a curated article
+app.post("/api/admin/article", (req, res) => {
+  const { key, title, summary, tag, link } = req.body;
+  if (key !== ADMIN_KEY) return res.status(401).json({ ok: false, error: "Invalid admin key" });
+  if (!title || !summary) return res.status(400).json({ ok: false, error: "Title and summary are required" });
+
+  const { tag: autoTag, tagColor } = assignTag(title, summary, tag || "Insurance");
+  const finalTag = tag || autoTag;
+  const finalColor = TAG_RULES.find(r => r.tag === finalTag)?.color || tagColor;
+
+  const article = {
+    id: `curated_${Date.now()}`,
+    title: title.trim(),
+    dek: truncate(summary, 160),
+    fullContent: summary.trim(),
+    link: link || "#",
+    pubDate: new Date().toISOString(),
+    time: "Just now",
+    source: "InsuralIQ",
+    tag: finalTag,
+    tagColor: finalColor,
+    india: true,
+    curated: true,
+    concepts: detectConcepts(`${title} ${summary}`),
+  };
+
+  curatedArticles.unshift(article); // Add to top
+  newsCache = [article, ...newsCache]; // Immediately visible
+  console.log(`  📝 Curated article added: "${title.slice(0, 50)}..."`);
+  res.json({ ok: true, article });
+});
+
+// DELETE /api/admin/article/:id — remove a curated article
+app.delete("/api/admin/article/:id", (req, res) => {
+  const { key } = req.body || {};
+  if (key !== ADMIN_KEY) return res.status(401).json({ ok: false, error: "Invalid admin key" });
+  curatedArticles = curatedArticles.filter(a => a.id !== req.params.id);
+  newsCache = newsCache.filter(a => a.id !== req.params.id);
+  res.json({ ok: true });
+});
+
+// GET /api/admin/curated — list curated articles
+app.get("/api/admin/curated", (req, res) => {
+  res.json({ ok: true, articles: curatedArticles });
+});
+
+// GET /admin — admin panel page
+app.get("/admin", (req, res) => {
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>InsuralIQ Admin — Add News</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Inter', system-ui, sans-serif; background: #f5f5f0; color: #1A2B32; min-height: 100vh; }
+  .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+  h1 { font-size: 22px; font-weight: 700; margin-bottom: 4px; color: #0E7C86; }
+  .subtitle { font-size: 13px; color: #5B6B70; margin-bottom: 24px; }
+  .card { background: #fff; border-radius: 12px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
+  label { display: block; font-size: 13px; font-weight: 600; color: #1A2B32; margin-bottom: 6px; }
+  input, textarea, select { width: 100%; padding: 10px 12px; border: 1.5px solid #ECE9E2; border-radius: 8px; font: 400 14px 'Inter', sans-serif; color: #1A2B32; }
+  input:focus, textarea:focus, select:focus { outline: none; border-color: #0E7C86; }
+  textarea { resize: vertical; min-height: 140px; line-height: 1.6; }
+  .field { margin-bottom: 16px; }
+  .btn { display: inline-block; padding: 12px 28px; background: #0E7C86; color: #fff; border: none; border-radius: 8px; font: 600 14px 'Inter', sans-serif; cursor: pointer; }
+  .btn:hover { background: #0A5A62; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-danger { background: #D35400; }
+  .btn-danger:hover { background: #a04000; }
+  .msg { padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; font-size: 13px; display: none; }
+  .msg.success { display: block; background: #E4F1F1; color: #0E7C86; }
+  .msg.error { display: block; background: #FFEDE9; color: #D35400; }
+  .existing { font-size: 13px; color: #5B6B70; }
+  .existing-item { padding: 10px 0; border-bottom: 1px solid #ECE9E2; display: flex; justify-content: space-between; align-items: start; gap: 10px; }
+  .existing-item:last-child { border-bottom: none; }
+  .existing-title { font-weight: 500; color: #1A2B32; font-size: 13px; }
+  .existing-meta { font-size: 11px; color: #5B6B70; margin-top: 2px; }
+  .del-btn { background: none; border: 1px solid #D35400; color: #D35400; padding: 4px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; white-space: nowrap; }
+  .tips { font-size: 12px; color: #5B6B70; line-height: 1.7; }
+  .tips strong { color: #1A2B32; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>InsuralIQ Editor Panel</h1>
+  <p class="subtitle">Add curated insurance news articles to your platform</p>
+
+  <div id="msg" class="msg"></div>
+
+  <div class="card">
+    <div class="field">
+      <label>Admin Key</label>
+      <input type="password" id="key" placeholder="Enter your admin key" />
+    </div>
+    <div class="field">
+      <label>Headline</label>
+      <input type="text" id="title" placeholder="e.g. BNP Paribas Cardif acquires 26% stake in IndiaFirst Life" />
+    </div>
+    <div class="field">
+      <label>Full Summary</label>
+      <textarea id="summary" placeholder="Write a comprehensive 3-4 paragraph summary of the news. This is what users will read on InsuralIQ."></textarea>
+    </div>
+    <div class="field">
+      <label>Category</label>
+      <select id="tag">
+        <option value="">Auto-detect</option>
+        <option value="IRDAI">IRDAI / Regulation</option>
+        <option value="Life Insurance">Life Insurance</option>
+        <option value="Health">Health Insurance</option>
+        <option value="Motor">Motor Insurance</option>
+        <option value="InsurTech">InsurTech</option>
+        <option value="Global">Global / Reinsurance</option>
+        <option value="Market">Market / IPO / FDI</option>
+        <option value="Claims">Claims</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Source Link (optional)</label>
+      <input type="url" id="link" placeholder="https://... (original article URL, if any)" />
+    </div>
+    <button class="btn" id="submitBtn" onclick="submitArticle()">Publish Article</button>
+  </div>
+
+  <div class="card">
+    <label>Your Curated Articles</label>
+    <div id="curatedList" class="existing" style="margin-top:10px">Loading...</div>
+  </div>
+
+  <div class="card tips">
+    <label>Tips for Great Summaries</label>
+    <p><strong>Paragraph 1:</strong> What happened? The key news in 2-3 sentences.</p>
+    <p><strong>Paragraph 2:</strong> Background — why does this matter for the insurance industry?</p>
+    <p><strong>Paragraph 3:</strong> Impact — what does this mean for policyholders, companies, or students?</p>
+    <p><strong>Paragraph 4 (optional):</strong> Your analysis or key takeaway.</p>
+    <p style="margin-top:8px">Separate paragraphs with a blank line for best readability.</p>
+  </div>
+</div>
+
+<script>
+const API = window.location.origin;
+
+async function submitArticle() {
+  const key = document.getElementById('key').value;
+  const title = document.getElementById('title').value;
+  const summary = document.getElementById('summary').value;
+  const tag = document.getElementById('tag').value;
+  const link = document.getElementById('link').value;
+  const msg = document.getElementById('msg');
+
+  if (!key || !title || !summary) {
+    msg.className = 'msg error';
+    msg.textContent = 'Please fill in Admin Key, Headline, and Summary.';
+    return;
+  }
+
+  document.getElementById('submitBtn').disabled = true;
+  try {
+    const res = await fetch(API + '/api/admin/article', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, title, summary, tag, link }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      msg.className = 'msg success';
+      msg.textContent = 'Article published! It\\'s now live on InsuralIQ.';
+      document.getElementById('title').value = '';
+      document.getElementById('summary').value = '';
+      document.getElementById('link').value = '';
+      loadCurated();
+    } else {
+      msg.className = 'msg error';
+      msg.textContent = data.error || 'Failed to publish.';
+    }
+  } catch(e) {
+    msg.className = 'msg error';
+    msg.textContent = 'Network error. Try again.';
+  }
+  document.getElementById('submitBtn').disabled = false;
+}
+
+async function loadCurated() {
+  try {
+    const res = await fetch(API + '/api/admin/curated');
+    const data = await res.json();
+    const list = document.getElementById('curatedList');
+    if (!data.articles || data.articles.length === 0) {
+      list.innerHTML = '<p>No curated articles yet. Add your first one above!</p>';
+      return;
+    }
+    list.innerHTML = data.articles.map(a => \`
+      <div class="existing-item">
+        <div>
+          <div class="existing-title">\${a.title}</div>
+          <div class="existing-meta">\${a.tag} · \${new Date(a.pubDate).toLocaleDateString()}</div>
+        </div>
+        <button class="del-btn" onclick="deleteArticle('\${a.id}')">Remove</button>
+      </div>
+    \`).join('');
+  } catch(e) {
+    document.getElementById('curatedList').innerHTML = '<p>Failed to load.</p>';
+  }
+}
+
+async function deleteArticle(id) {
+  const key = document.getElementById('key').value;
+  if (!key) { alert('Enter admin key first'); return; }
+  if (!confirm('Remove this article?')) return;
+  try {
+    await fetch(API + '/api/admin/article/' + id, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key }),
+    });
+    loadCurated();
+  } catch(e) { alert('Failed to delete'); }
+}
+
+loadCurated();
+</script>
+</body>
+</html>`);
 });
 
 // GET / — serve the frontend
