@@ -304,7 +304,7 @@ body {
 <nav class="bottom-nav" id="bottomNav">
   <button class="tab-btn active" data-tab="briefing" onclick="switchTab('briefing')"><span class="tab-icon">📰</span><span class="tab-label">Briefing</span></button>
   <button class="tab-btn" data-tab="pathshala" onclick="switchTab('pathshala')"><span class="tab-icon">📚</span><span class="tab-label">Pathshala</span></button>
-  <button class="tab-btn" data-tab="companies" onclick="switchTab('companies')"><span class="tab-icon">🏢</span><span class="tab-label">Companies</span></button>
+  <button class="tab-btn" data-tab="bfsi" onclick="switchTab('bfsi')"><span class="tab-icon">📊</span><span class="tab-label">BFSI</span></button>
   <button class="tab-btn" data-tab="regs" onclick="switchTab('regs')"><span class="tab-icon">📋</span><span class="tab-label">Regs</span></button>
   <button class="tab-btn" data-tab="more" onclick="switchTab('more')"><span class="tab-icon">⋯</span><span class="tab-label">More</span></button>
 </nav>
@@ -594,6 +594,9 @@ let scrollPositions = {};
 let selectedArticle = null;
 let lastOpenedConcept = null;
 let savedArticles = new Set();
+let bfsiArticles = [];
+let bfsiTags = [];
+let activeBFSITag = 'All';
 
 // ── API ──
 async function fetchNews(tag, search) {
@@ -610,6 +613,25 @@ async function fetchNews(tag, search) {
 async function fetchTags() {
   try {
     const res = await fetch(`${API_BASE}/api/tags`);
+    const data = await res.json();
+    return data.tags || [];
+  } catch (e) { return []; }
+}
+
+async function fetchBFSI(tag, search) {
+  let url = `${API_BASE}/api/bfsi?limit=30`;
+  if (tag && tag !== 'All') url += `&tag=${encodeURIComponent(tag)}`;
+  if (search) url += `&search=${encodeURIComponent(search)}`;
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    return data.articles || [];
+  } catch (e) { return []; }
+}
+
+async function fetchBFSITags() {
+  try {
+    const res = await fetch(`${API_BASE}/api/bfsi/tags`);
     const data = await res.json();
     return data.tags || [];
   } catch (e) { return []; }
@@ -705,6 +727,109 @@ async function renderBriefing() {
     ${tagHtml}
     ${cardsHtml}
     <div class="footer-info">${articles.length} articles · Updated every 15 min · Trusted sources only</div>`;
+}
+
+// ── Render: BFSI Section ──
+async function renderBFSI() {
+  const area = document.getElementById('scrollArea');
+  const today = new Date().toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
+
+  area.innerHTML = `
+    <div style="padding:18px 0 8px">
+      <div style="display:flex;align-items:baseline;justify-content:space-between">
+        <h1 style="font:600 26px var(--display);color:var(--ink);letter-spacing:-0.5px">BFSI Watch</h1>
+        <span style="font:500 13px var(--font);color:var(--sub)">${today}</span>
+      </div>
+      <p style="font:400 14px var(--font);color:var(--sub);margin:5px 0 0">
+        Banking, Financial Services & broader market news
+      </p>
+    </div>
+    <div class="loading"><div class="spinner"></div>Fetching BFSI news…</div>`;
+
+  const [articles, tags] = await Promise.all([fetchBFSI(activeBFSITag, searchQuery), fetchBFSITags()]);
+  bfsiArticles = articles;
+  bfsiTags = tags;
+
+  let tagHtml = `<div class="tag-strip">
+    <button class="tag-pill ${activeBFSITag === 'All' ? 'active' : ''}" onclick="filterBFSIByTag('All')">All</button>`;
+  tags.slice(0, 8).forEach(t => {
+    tagHtml += `<button class="tag-pill ${activeBFSITag === t.tag ? 'active' : ''}" onclick="filterBFSIByTag('${esc(t.tag)}')">${t.tag} (${t.count})</button>`;
+  });
+  tagHtml += '</div>';
+
+  let cardsHtml = '';
+  if (articles.length === 0) {
+    cardsHtml = `<div style="text-align:center;padding:40px 0;color:var(--sub);font:400 14px var(--font)">
+      ${searchQuery ? 'No BFSI articles match your search.' : 'No BFSI articles available yet. Check back soon!'}
+    </div>`;
+  } else {
+    articles.forEach((a, i) => {
+      const tagBg = a.tagColor + '14';
+      cardsHtml += `
+      <button class="briefing-card" onclick="openBFSIArticle(${i})">
+        <div class="card-top">
+          <span class="card-tag" style="color:${a.tagColor};background:${tagBg}">${esc(a.tag)}</span>
+          ${a.india ? '<span class="india-dot">● INDIA</span>' : ''}
+          <span class="card-time">${esc(a.time)}</span>
+        </div>
+        <div class="card-title">${esc(a.title)}</div>
+        <div class="card-dek">${esc(a.dek)}</div>
+        <div class="card-footer">
+          <span class="card-source">${a.originPublisher ? esc(a.originPublisher) : 'InsuralIQ'}</span>
+          <span class="read-more">Read →</span>
+        </div>
+      </button>`;
+    });
+  }
+
+  area.innerHTML = `
+    <div style="padding:18px 0 8px">
+      <div style="display:flex;align-items:baseline;justify-content:space-between">
+        <h1 style="font:600 26px var(--display);color:var(--ink);letter-spacing:-0.5px">BFSI Watch</h1>
+        <span style="font:500 13px var(--font);color:var(--sub)">${today}</span>
+      </div>
+      <p style="font:400 14px var(--font);color:var(--sub);margin:5px 0 0">
+        Banking, Financial Services & broader market news
+      </p>
+    </div>
+    ${tagHtml}
+    ${cardsHtml}
+    <div class="footer-info">${articles.length} articles · Updated every 15 min</div>`;
+}
+
+// ── Render: BFSI Article Detail ──
+function renderBFSIArticle(article) {
+  if (!article) return;
+  const area = document.getElementById('scrollArea');
+  const tagBg = article.tagColor + '14';
+
+  const fullText = article.fullContent || article.dek;
+  const paragraphs = fullText.split('\\n').filter(p => p.trim());
+  const contentHtml = paragraphs.map(p => `<p>${esc(p)}</p>`).join('');
+
+  area.innerHTML = `
+    <div style="padding:0 0 40px">
+      <div style="padding:14px 0 0">
+        <button class="back-btn" onclick="navigate('bfsi')">← BFSI Watch</button>
+      </div>
+      <div style="padding:10px 0 0">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+          <span class="pill" style="color:${article.tagColor};background:${tagBg}">${esc(article.tag)}</span>
+          ${article.india ? '<span style="font:600 10px var(--font);color:var(--coral);letter-spacing:0.5px">● INDIA</span>' : ''}
+          <span class="pill" style="color:#1A6B8A;background:#1A6B8A14">BFSI</span>
+        </div>
+        <h1 style="font:600 23px var(--display);color:var(--ink);line-height:1.24;letter-spacing:-0.4px">
+          ${esc(article.title)}
+        </h1>
+        <div style="font:400 12.5px var(--font);color:var(--sub);margin:10px 0 18px">
+          ${article.originPublisher ? esc(article.originPublisher) + ' · ' : ''}${esc(article.time)}
+        </div>
+        <div class="article-content">${contentHtml}</div>
+        ${article.link && article.link !== '#' ? `<a href="${esc(article.link)}" target="_blank" rel="noopener" style="display:inline-block;font:500 12px var(--font);color:var(--teal);text-decoration:none;margin-top:8px;padding:8px 14px;border:1px solid var(--line);border-radius:8px">
+          Read full article ↗
+        </a>` : ''}
+      </div>
+    </div>`;
 }
 
 // ── Render: Article Detail (with full content) ──
@@ -893,16 +1018,21 @@ function switchTab(tab) {
   document.getElementById('searchInput').value = '';
   if (tab === 'briefing') { activeTag = 'All'; navigate('briefing'); }
   else if (tab === 'pathshala') navigate('pathshala');
-  else if (tab === 'companies') navigate('companies');
+  else if (tab === 'bfsi') { activeBFSITag = 'All'; navigate('bfsi'); }
   else if (tab === 'regs') navigate('regs');
   else if (tab === 'more') navigate('more');
 }
 
 function filterByTag(tag) { activeTag = tag; navigate('briefing'); }
+function filterBFSIByTag(tag) { activeBFSITag = tag; navigate('bfsi'); }
+function openBFSIArticle(idx) { selectedArticle = idx; navigate('bfsi-detail'); }
 function handleSearch() {
   searchQuery = document.getElementById('searchInput').value.trim();
   clearTimeout(handleSearch._t);
-  handleSearch._t = setTimeout(() => { if (currentScreen === 'briefing') renderBriefing(); }, 350);
+  handleSearch._t = setTimeout(() => {
+    if (currentScreen === 'briefing') renderBriefing();
+    else if (currentScreen === 'bfsi') renderBFSI();
+  }, 350);
 }
 
 function openArticle(idx) { selectedArticle = idx; navigate('article-detail'); }
@@ -923,10 +1053,11 @@ function render() {
   switch (currentScreen) {
     case 'briefing': renderBriefing(); break;
     case 'article-detail': renderArticle(liveArticles[selectedArticle]); break;
+    case 'bfsi': renderBFSI(); break;
+    case 'bfsi-detail': renderBFSIArticle(bfsiArticles[selectedArticle]); break;
     case 'pathshala': renderPathshala(); break;
     case 'track': renderTrack(currentTrack); break;
     case 'lesson': renderLesson(currentTrack, currentLessonIdx); break;
-    case 'companies': renderComingSoon('Companies', '🏢', 'Detailed profiles of Indian insurance companies with financials, claim data, and product comparisons are on the way. Stay tuned!'); break;
     case 'regs': renderComingSoon('Regulatory Updates', '📋', 'A curated tracker of IRDAI regulations, circulars, and reform updates is being built. Launching soon!'); break;
     case 'more': renderComingSoon('More Features', '⚙️', 'Bookmarks, reading history, dark mode, and notification settings are in development. We\'ll have them ready soon!'); break;
     default: renderComingSoon('Coming Soon', '🚀', 'This feature is being crafted for you. Check back soon!');
@@ -936,6 +1067,7 @@ function render() {
 function updateTabs() {
   const map = {
     'article-detail': 'briefing', 'briefing': 'briefing',
+    'bfsi': 'bfsi', 'bfsi-detail': 'bfsi',
     'lesson': 'pathshala', 'track': 'pathshala', 'pathshala': 'pathshala',
   };
   const activeTabId = map[currentScreen] || currentScreen;
