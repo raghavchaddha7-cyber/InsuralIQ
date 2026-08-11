@@ -103,50 +103,62 @@ const NEWSDATA_QUERIES = [
 let queryRotationIndex = 0;
 const QUERIES_PER_CYCLE = 2;
 
-// ── RSS Feed Sources (fallback) ────────────────────────────────
+// ── Google News RSS (free, unlimited, no API key) ──────────────
+// This is our biggest volume source. Google News aggregates every
+// Indian publisher (ET, Mint, Moneycontrol, BS, Hindu BL, FE...)
+// and serves RSS without rate limits or API keys.
+// Each query is TOPIC-SCOPED, so results are insurance news by
+// construction — no keyword gate needed (scoped: true).
+const GOOGLE_NEWS_QUERIES = [
+  { q: "IRDAI insurance India", tag: "IRDAI" },
+  { q: "life insurance India LIC", tag: "Life Insurance" },
+  { q: "health insurance India claim", tag: "Health" },
+  { q: "motor insurance India vehicle", tag: "Motor" },
+  { q: "general insurance India premium", tag: "Insurance" },
+  { q: "insurtech India insurance technology", tag: "InsurTech" },
+  { q: "reinsurance India GIC Re", tag: "Global" },
+  { q: "insurance claim settlement India", tag: "Claims" },
+  { q: "crop insurance PMFBY India", tag: "Insurance" },
+  { q: "insurance FDI acquisition India insurer", tag: "Market" },
+  { q: "\"HDFC Life\" OR \"SBI Life\" OR \"ICICI Prudential\" OR \"Max Life\"", tag: "Life Insurance" },
+  { q: "\"Star Health\" OR \"Niva Bupa\" OR \"Care Health\" insurance", tag: "Health" },
+  { q: "\"Bajaj Allianz\" OR \"Tata AIG\" OR \"ICICI Lombard\" insurance", tag: "Insurance" },
+  { q: "\"Go Digit\" OR Acko OR Policybazaar insurance", tag: "InsurTech" },
+  { q: "insurance regulation India policyholder", tag: "IRDAI" },
+  { q: "Bima Sugam OR bancassurance India", tag: "IRDAI" },
+];
+
+function googleNewsUrl(q) {
+  return `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-IN&gl=IN&ceid=IN:en`;
+}
+
+// ── RSS Feed Sources ───────────────────────────────────────────
+// scoped: true  → feed is insurance-only, accept without keyword gate
+// scoped: false → general feed, apply keyword gate
+const DIRECT_FEEDS = [
+  { url: "https://economictimes.indiatimes.com/industry/banking/finance/insure/rssfeeds/13358277.cms", source: "Economic Times", defaultTag: "Insurance", india: true, scoped: true },
+  { url: "https://www.livemint.com/rss/insurance", source: "Livemint", defaultTag: "Insurance", india: true, scoped: true },
+  { url: "https://www.moneycontrol.com/rss/insurance.xml", source: "Moneycontrol", defaultTag: "Insurance", india: true, scoped: true },
+  { url: "https://www.business-standard.com/rss/finance/insurance-101.rss", source: "Business Standard", defaultTag: "Insurance", india: true, scoped: true },
+  { url: "https://www.financialexpress.com/money/insurance/feed/", source: "Financial Express", defaultTag: "Insurance", india: true, scoped: true },
+  { url: "https://www.thehindubusinessline.com/money-and-banking/feeder/default.rss", source: "Hindu BusinessLine", defaultTag: "BFSI", india: true, scoped: false },
+  { url: "https://bimabazaar.com/feed", source: "BimaBazaar", defaultTag: "Insurance", india: true, scoped: true },
+  { url: "https://joinditto.in/articles/rss/", source: "Ditto Insurance", defaultTag: "Life Insurance", india: true, scoped: true },
+  { url: "https://www.moneycontrol.com/rss/business.xml", source: "Moneycontrol Business", defaultTag: "BFSI", india: true, scoped: false },
+  { url: "https://economictimes.indiatimes.com/industry/banking/finance/rssfeeds/13358259.cms", source: "ET BFSI", defaultTag: "BFSI", india: true, scoped: false },
+];
+
+// Combined feed list: Google News (scoped) + direct publisher feeds
 const FEEDS = [
-  {
-    url: "https://economictimes.indiatimes.com/industry/banking/finance/insure/rssfeeds/13358277.cms",
-    source: "Economic Times",
-    defaultTag: "Insurance",
+  ...GOOGLE_NEWS_QUERIES.map((g) => ({
+    url: googleNewsUrl(g.q),
+    source: "Google News",
+    defaultTag: g.tag,
     india: true,
-  },
-  {
-    url: "https://www.livemint.com/rss/insurance",
-    source: "Livemint",
-    defaultTag: "Insurance",
-    india: true,
-  },
-  {
-    url: "https://www.moneycontrol.com/rss/insurance.xml",
-    source: "Moneycontrol",
-    defaultTag: "Insurance",
-    india: true,
-  },
-  {
-    url: "https://www.business-standard.com/rss/finance/insurance-101.rss",
-    source: "Business Standard",
-    defaultTag: "Insurance",
-    india: true,
-  },
-  {
-    url: "https://joinditto.in/articles/rss/",
-    source: "Ditto Insurance",
-    defaultTag: "Life Insurance",
-    india: true,
-  },
-  {
-    url: "https://bimabazaar.com/feed",
-    source: "BimaBazaar",
-    defaultTag: "Insurance",
-    india: true,
-  },
-  {
-    url: "https://www.moneycontrol.com/rss/latestnews.xml",
-    source: "Moneycontrol",
-    defaultTag: "BFSI",
-    india: true,
-  },
+    scoped: true,
+    label: g.q.slice(0, 38),
+  })),
+  ...DIRECT_FEEDS,
 ];
 
 // ── Auto-tagging Rules ──────────────────────────────────────────
@@ -745,47 +757,139 @@ async function fetchFromAPITube() {
   return results;
 }
 
+// ── Resilient Feed Fetch (direct → proxy fallback) ─────────────
+// Some publishers 403 requests coming from cloud/datacenter IPs.
+// If a direct fetch fails, we retry through public read proxies
+// which fetch server-side and return the raw XML.
+const RSS_PROXIES = [
+  (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+  (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+];
+
+function httpGetRaw(url, timeout = 14000) {
+  const https = require("https");
+  return new Promise((resolve, reject) => {
+    const req = https.get(
+      url,
+      {
+        timeout,
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+          Accept: "application/rss+xml,application/xml,text/xml,*/*;q=0.8",
+          "Accept-Language": "en-IN,en;q=0.9",
+        },
+      },
+      (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.resume();
+          return resolve(httpGetRaw(res.headers.location, timeout));
+        }
+        if (res.statusCode !== 200) {
+          res.resume();
+          return reject(new Error(`Status ${res.statusCode}`));
+        }
+        let body = "";
+        res.on("data", (c) => (body += c));
+        res.on("end", () => resolve(body));
+      }
+    );
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error("Timeout")); });
+  });
+}
+
+// Try direct first, then each proxy in turn
+async function fetchFeedResilient(feed) {
+  try {
+    const parsed = await parser.parseURL(feed.url);
+    if (parsed.items && parsed.items.length) return { parsed, via: "direct" };
+  } catch (e) { /* fall through to proxies */ }
+
+  for (let i = 0; i < RSS_PROXIES.length; i++) {
+    try {
+      const xml = await httpGetRaw(RSS_PROXIES[i](feed.url));
+      const parsed = await parser.parseString(xml);
+      if (parsed.items && parsed.items.length) return { parsed, via: `proxy${i + 1}` };
+    } catch (e) { /* try next proxy */ }
+  }
+  throw new Error("All fetch attempts failed (direct + proxies)");
+}
+
+// Google News titles arrive as "Headline - Publisher" — split that out
+function splitGoogleTitle(raw) {
+  const m = raw.match(/^(.*)\s+-\s+([^-]{2,40})$/);
+  if (m) return { title: m[1].trim(), publisher: m[2].trim() };
+  return { title: raw, publisher: "" };
+}
+
 // ── RSS Feed Fetch ─────────────────────────────────────────────
 async function fetchFromRSSFeeds() {
   const results = [];
   const errors = [];
+  const sourceStats = [];
 
   await Promise.allSettled(
     FEEDS.map(async (feed) => {
+      const name = feed.label ? `${feed.source}: ${feed.label}` : feed.source;
       try {
-        const parsed = await parser.parseURL(feed.url);
+        const { parsed, via } = await fetchFeedResilient(feed);
         const items = (parsed.items || []).slice(0, 15);
+        let kept = 0, dropped = 0;
+
         for (const item of items) {
-          const title = item.title || "Untitled";
+          const rawTitle = item.title || "Untitled";
+          const { title, publisher } = feed.source === "Google News"
+            ? splitGoogleTitle(rawTitle)
+            : { title: rawTitle, publisher: "" };
+
           const snippet = item.contentSnippet || item.content || "";
           const fullContent = extractFullContent(item);
+          const link = item.link || "";
 
-          // ── RELEVANCE GATE: reject non-insurance articles ──
-          if (!isInsuranceRelevant(title, snippet, fullContent)) continue;
+          if (isDomainBlocked(link)) { dropped++; continue; }
+
+          // ── TIERED RELEVANCE GATE ──
+          // scoped feed  → already insurance-only, accept as-is
+          // general feed → require 2 keyword matches
+          if (!feed.scoped) {
+            const text = `${title} ${snippet} ${fullContent}`.toLowerCase();
+            let n = 0;
+            for (const kw of INSURANCE_KEYWORDS) {
+              if (text.includes(kw)) n++;
+              if (n >= 2) break;
+            }
+            if (n < 2) { dropped++; continue; }
+          }
 
           const { tag, tagColor } = assignTag(title, snippet, feed.defaultTag);
           results.push({
-            id: Buffer.from(item.link || title).toString("base64").slice(0, 20),
-            title: title,
-            dek: truncate(snippet),
+            id: Buffer.from(link || title).toString("base64").slice(0, 20),
+            title,
+            dek: truncate(cleanSummary(snippet)),
             fullContent: fullContent || truncate(snippet, 800),
-            link: item.link || "",
+            link,
             pubDate: item.pubDate || item.isoDate || new Date().toISOString(),
             time: timeAgo(item.pubDate || item.isoDate || new Date()),
             source: "InsuralIQ",
+            originPublisher: publisher || feed.source,
             tag,
             tagColor,
             india: feed.india,
+            trusted: isDomainTrusted(link) || feed.scoped,
             concepts: detectConcepts(`${title} ${fullContent || snippet}`),
           });
+          kept++;
         }
+        sourceStats.push({ source: name, via, fetched: items.length, kept, dropped });
       } catch (err) {
-        errors.push({ source: feed.source, url: feed.url, error: err.message });
+        errors.push({ source: name, url: feed.url, error: err.message });
+        sourceStats.push({ source: name, via: "failed", fetched: 0, kept: 0, dropped: 0 });
       }
     })
   );
 
-  return { results, errors };
+  return { results, errors, sourceStats };
 }
 
 // ── Accumulated articles from previous rotations ──────────────
@@ -793,6 +897,8 @@ async function fetchFromRSSFeeds() {
 // earlier rotations and merge new ones in. This builds a rich pool
 // throughout the day. Articles older than 48h are auto-pruned.
 let accumulatedArticles = [];
+let lastSourceStats = [];
+const BUILD_VERSION = "v7-multisource";
 
 // ── Main Fetch (API first → RSS fallback → Seed fallback) ─────
 async function fetchAllFeeds() {
@@ -824,20 +930,23 @@ async function fetchAllFeeds() {
     }
   }
 
-  // Step 3: Also try RSS feeds (bonus articles if they work)
-  console.log("  📡 [3/3] RSS feeds...");
-  const { results: rssResults, errors: rssErrors } = await fetchFromRSSFeeds();
+  // Step 3: RSS feeds — Google News + direct publishers (biggest source)
+  console.log(`  📡 [3/3] RSS feeds (${FEEDS.length} sources)...`);
+  const { results: rssResults, errors: rssErrors, sourceStats } = await fetchFromRSSFeeds();
   errors = rssErrors;
+  lastSourceStats = sourceStats;
 
   if (rssResults.length > 0) {
     newResults = [...newResults, ...rssResults];
     if (!newsSource || newsSource === "none") newsSource = "rss";
-    console.log(`  ✅ Got ${rssResults.length} articles from RSS`);
+    const okCount = sourceStats.filter((s) => s.via !== "failed").length;
+    const viaProxy = sourceStats.filter((s) => s.via && s.via.startsWith("proxy")).length;
+    console.log(`  ✅ Got ${rssResults.length} articles from ${okCount}/${FEEDS.length} feeds (${viaProxy} via proxy)`);
   }
 
   if (rssErrors.length > 0) {
-    console.log(`  ⚠ ${rssErrors.length} RSS feeds failed`);
-    rssErrors.forEach((e) => console.log(`    → ${e.source}: ${e.error}`));
+    console.log(`  ⚠ ${rssErrors.length} feeds failed`);
+    rssErrors.slice(0, 5).forEach((e) => console.log(`    → ${e.source}: ${e.error}`));
   }
 
   // Merge new articles into the accumulated pool
@@ -918,11 +1027,21 @@ app.get("/api/news", (req, res) => {
     cutoff.setHours(0, 0, 0, 0);
     const freshItems = items.filter((i) => new Date(i.pubDate) >= cutoff);
 
-    // If we have fresh articles, use them; otherwise show most recent 15
-    if (freshItems.length > 0) {
+    // NEVER-EMPTY GUARANTEE: if the fresh window is too thin, widen
+    // it progressively rather than showing the user a near-blank page.
+    const MIN_ARTICLES = 8;
+    if (freshItems.length >= MIN_ARTICLES) {
       items = freshItems;
     } else {
-      items = items.slice(0, 15); // show most recent even if older
+      let widened = freshItems;
+      for (const d of [3, 5, 7, 14, 30]) {
+        const c = new Date();
+        c.setDate(c.getDate() - d);
+        c.setHours(0, 0, 0, 0);
+        widened = items.filter((i) => new Date(i.pubDate) >= c);
+        if (widened.length >= MIN_ARTICLES) break;
+      }
+      items = widened.length > 0 ? widened : items.slice(0, 15);
     }
   }
 
@@ -983,11 +1102,13 @@ app.get("/api/status", (req, res) => {
   const todayCount = newsCache.filter(a => new Date(a.pubDate).toDateString() === today).length;
   res.json({
     ok: true,
+    build: BUILD_VERSION,
     articleCount: newsCache.length,
     todayCount,
     curatedCount: curatedArticles.length,
     lastFetched: lastFetchTime,
     newsSource,
+    rssSources: FEEDS.length,
     apis: {
       newsdata: { configured: !!NEWSDATA_API_KEY, rotation: `${queryRotationIndex}/${NEWSDATA_QUERIES.length}`, perCycle: QUERIES_PER_CYCLE },
       apitube: { configured: !!APITUBE_API_KEY, rotation: `${apitubeRotationIndex}/${APITUBE_QUERIES.length}`, perCycle: APITUBE_QUERIES_PER_CYCLE },
@@ -1003,6 +1124,29 @@ app.get("/api/status", (req, res) => {
     feedCount: FEEDS.length,
     feedErrors: fetchErrors.length,
     usingSeedData: usingSeed,
+    errors: fetchErrors,
+  });
+});
+
+// GET /api/debug — per-source diagnostics (what worked, what didn't)
+app.get("/api/debug", (req, res) => {
+  const ok = lastSourceStats.filter((s) => s.via !== "failed");
+  const failed = lastSourceStats.filter((s) => s.via === "failed");
+  res.json({
+    ok: true,
+    build: BUILD_VERSION,
+    lastFetched: lastFetchTime,
+    summary: {
+      totalSources: FEEDS.length,
+      working: ok.length,
+      failed: failed.length,
+      viaDirect: ok.filter((s) => s.via === "direct").length,
+      viaProxy: ok.filter((s) => s.via && s.via.startsWith("proxy")).length,
+      articlesKept: lastSourceStats.reduce((a, s) => a + s.kept, 0),
+      articlesDropped: lastSourceStats.reduce((a, s) => a + s.dropped, 0),
+    },
+    working: ok.sort((a, b) => b.kept - a.kept),
+    failed: failed.map((s) => s.source),
     errors: fetchErrors,
   });
 });
@@ -1257,8 +1401,10 @@ app.listen(PORT, async () => {
   console.log(`  └──────────────────────────────────────┘`);
   console.log(`  📡 NewsData.io: ${NEWSDATA_API_KEY ? "✅ Key set" : "❌ No key"} | ${QUERIES_PER_CYCLE} queries/cycle × ${NEWSDATA_QUERIES.length} total`);
   console.log(`  📡 APITube.io:  ${APITUBE_API_KEY ? "✅ Key set" : "❌ No key"} | ${APITUBE_QUERIES_PER_CYCLE} queries/cycle × ${APITUBE_QUERIES.length} total`);
-  console.log(`  🔒 Quality: ${TRUSTED_DOMAINS.size} trusted domains | ${BLOCKED_DOMAINS.size} blocked | ${INSURANCE_KEYWORDS.length} keywords`);
-  console.log(`  ⏱  Refresh: every 15 min\n`);
+  console.log(`  📰 RSS: ${GOOGLE_NEWS_QUERIES.length} Google News queries + ${DIRECT_FEEDS.length} direct feeds = ${FEEDS.length} sources (no key needed)`);
+  console.log(`  🔒 Quality: ${TRUSTED_DOMAINS.size} trusted | ${BLOCKED_DOMAINS.size} blocked | ${INSURANCE_KEYWORDS.length} keywords`);
+  console.log(`  🔁 Proxy fallback: ${RSS_PROXIES.length} proxies for 403-blocked feeds`);
+  console.log(`  ⏱  Refresh: every 15 min | Build: ${BUILD_VERSION}\n`);
 
   // Initial fetch on startup
   await fetchAllFeeds();
