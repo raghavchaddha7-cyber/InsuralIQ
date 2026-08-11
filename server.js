@@ -208,6 +208,27 @@ const TAG_RULES = [
   },
 ];
 
+// ── BFSI Tag Rules (for non-insurance financial articles) ─────
+const BFSI_TAG_RULES = [
+  { keywords: ["bank", "banking", "rbi", "npa", "repo rate", "credit growth", "nbfc", "lending"], tag: "Banking", color: "#1A6B8A" },
+  { keywords: ["mutual fund", "sip", "amc", "etf", "fund manager"], tag: "Mutual Funds", color: "#6B4E9B" },
+  { keywords: ["stock", "nse", "bse", "sensex", "nifty", "share price", "market cap", "ipo", "listing", "equity"], tag: "Markets", color: "#2E7D32" },
+  { keywords: ["fintech", "upi", "digital payment", "wallet", "paytm", "phonepe", "google pay"], tag: "FinTech", color: "#00897B" },
+  { keywords: ["results", "profit", "revenue", "earnings", "quarterly", "q1", "q2", "q3", "q4", "ebitda", "margin"], tag: "Earnings", color: "#E65100" },
+  { keywords: ["gdp", "inflation", "fiscal", "monetary", "economy", "budget", "rupee", "forex"], tag: "Economy", color: "#4A148C" },
+  { keywords: ["sebi", "regulation", "compliance", "circular"], tag: "Regulation", color: "#0E7C86" },
+];
+
+function assignBFSITag(title, description) {
+  const text = `${title} ${description}`.toLowerCase();
+  for (const rule of BFSI_TAG_RULES) {
+    if (rule.keywords.some(kw => text.includes(kw))) {
+      return { tag: rule.tag, tagColor: rule.color };
+    }
+  }
+  return { tag: "Business", tagColor: "#5B6B70" };
+}
+
 // ── Concept Detection ───────────────────────────────────────────
 // Terms that can be highlighted as tappable explainers in the frontend
 const KNOWN_CONCEPTS = [
@@ -407,6 +428,65 @@ function isInsuranceRelevant(title, description, content) {
   }
   // Need at least 2 insurance keyword matches to be considered relevant
   return matchCount >= 2;
+}
+
+// ── BFSI Keywords (broader financial/business terms) ──────────
+// Articles that fail the insurance gate but match BFSI keywords
+// go into the BFSI section instead of being dropped.
+const BFSI_KEYWORDS = [
+  // Banking
+  "bank", "banking", "rbi", "reserve bank", "npa", "repo rate",
+  "interest rate", "credit growth", "deposits", "loans", "lending",
+  "nbfc", "fintech", "upi", "digital payments", "neft", "rtgs",
+  "savings account", "fixed deposit", "current account", "casa",
+  "home loan", "personal loan", "credit card", "debit card",
+  "net banking", "mobile banking", "banking sector",
+  "sbi", "hdfc bank", "icici bank", "axis bank", "kotak mahindra bank",
+  "bank of baroda", "pnb", "canara bank", "union bank", "idbi",
+  "yes bank", "indusind bank", "bandhan bank", "federal bank",
+  "rbl bank", "idfc first", "au small finance",
+
+  // Financial services
+  "mutual fund", "mutual funds", "sip", "amc", "nav",
+  "stock market", "nse", "bse", "sensex", "nifty",
+  "equity", "debt", "bond", "bonds", "debenture",
+  "ipo", "listing", "share price", "market cap",
+  "portfolio", "investment", "investor", "investors",
+  "sebi", "securities", "trading", "broker", "brokerage",
+  "wealth management", "asset management", "pms",
+  "pension fund", "provident fund", "epfo", "nps",
+  "gold loan", "microfinance", "financial inclusion",
+
+  // Corporate results & business
+  "quarterly results", "q1 results", "q2 results", "q3 results", "q4 results",
+  "profit", "revenue", "earnings", "net income", "ebitda",
+  "turnover", "margin", "dividend", "balance sheet",
+  "annual report", "fiscal year", "financial year",
+  "market share", "valuation", "merger", "acquisition",
+  "stake", "shareholding", "promoter", "fdi",
+
+  // Economy
+  "gdp", "inflation", "cpi", "fiscal deficit", "fiscal policy",
+  "monetary policy", "economic growth", "economy",
+  "rupee", "forex", "dollar", "exchange rate",
+  "trade deficit", "exports", "imports", "gst",
+  "budget", "union budget", "finance minister", "rbi governor",
+  "credit rating", "sovereign rating",
+
+  // Specific companies commonly in BFSI news
+  "wipro", "tcs", "infosys", "hcl", "tech mahindra",
+  "reliance", "tata", "adani", "birla", "mahindra",
+  "bajaj", "godrej", "larsen", "siemens", "mrf",
+];
+
+function isBFSIRelevant(title, description, content) {
+  const text = `${title} ${description} ${content}`.toLowerCase();
+  let matchCount = 0;
+  for (const kw of BFSI_KEYWORDS) {
+    if (text.includes(kw)) matchCount++;
+    if (matchCount >= 2) return true;
+  }
+  return false;
 }
 
 // ── Tag Assignment ──────────────────────────────────────────────
@@ -828,6 +908,7 @@ function splitGoogleTitle(raw) {
 // ── RSS Feed Fetch ─────────────────────────────────────────────
 async function fetchFromRSSFeeds() {
   const results = [];
+  const bfsiResults = [];  // Non-insurance financial articles → BFSI section
   const errors = [];
   const sourceStats = [];
 
@@ -837,7 +918,7 @@ async function fetchFromRSSFeeds() {
       try {
         const { parsed, via } = await fetchFeedResilient(feed);
         const items = (parsed.items || []).slice(0, 15);
-        let kept = 0, dropped = 0;
+        let kept = 0, bfsiKept = 0, dropped = 0;
 
         for (const item of items) {
           const rawTitle = item.title || "Untitled";
@@ -852,49 +933,67 @@ async function fetchFromRSSFeeds() {
           if (isDomainBlocked(link)) { dropped++; continue; }
 
           // ── TIERED RELEVANCE GATE ──
-          // Every article must have at least SOME insurance keyword match.
-          // Thresholds:
-          //   scoped feed (ET Insurance, Livemint Insurance, etc.) → 1 keyword (safety net)
-          //   general feed / Google News → 2 keywords
-          {
-            const threshold = feed.scoped ? 1 : 2;
-            const text = `${title} ${snippet} ${fullContent}`.toLowerCase();
-            let n = 0;
-            for (const kw of INSURANCE_KEYWORDS) {
-              if (text.includes(kw)) n++;
-              if (n >= threshold) break;
-            }
-            if (n < threshold) { dropped++; continue; }
+          // Insurance check first → if fails, try BFSI → if fails, drop
+          const threshold = feed.scoped ? 1 : 2;
+          const text = `${title} ${snippet} ${fullContent}`.toLowerCase();
+          let insuranceMatches = 0;
+          for (const kw of INSURANCE_KEYWORDS) {
+            if (text.includes(kw)) insuranceMatches++;
+            if (insuranceMatches >= threshold) break;
           }
 
-          const { tag, tagColor } = assignTag(title, snippet, feed.defaultTag);
-          results.push({
-            id: Buffer.from(link || title).toString("base64").slice(0, 20),
-            title,
-            dek: truncate(cleanSummary(snippet)),
-            fullContent: fullContent || truncate(snippet, 800),
-            link,
-            pubDate: item.pubDate || item.isoDate || new Date().toISOString(),
-            time: timeAgo(item.pubDate || item.isoDate || new Date()),
-            source: "InsuralIQ",
-            originPublisher: publisher || feed.source,
-            tag,
-            tagColor,
-            india: feed.india,
-            trusted: isDomainTrusted(link) || feed.scoped,
-            concepts: detectConcepts(`${title} ${fullContent || snippet}`),
-          });
-          kept++;
+          if (insuranceMatches >= threshold) {
+            // ✅ Insurance article → main feed
+            const { tag, tagColor } = assignTag(title, snippet, feed.defaultTag);
+            results.push({
+              id: Buffer.from(link || title).toString("base64").slice(0, 20),
+              title,
+              dek: truncate(cleanSummary(snippet)),
+              fullContent: fullContent || truncate(snippet, 800),
+              link,
+              pubDate: item.pubDate || item.isoDate || new Date().toISOString(),
+              time: timeAgo(item.pubDate || item.isoDate || new Date()),
+              source: "InsuralIQ",
+              originPublisher: publisher || feed.source,
+              tag,
+              tagColor,
+              india: feed.india,
+              trusted: isDomainTrusted(link) || feed.scoped,
+              concepts: detectConcepts(`${title} ${fullContent || snippet}`),
+            });
+            kept++;
+          } else if (isBFSIRelevant(title, snippet, fullContent)) {
+            // 📊 BFSI article → BFSI section
+            const { tag, tagColor } = assignBFSITag(title, snippet);
+            bfsiResults.push({
+              id: `bfsi_${Buffer.from(link || title).toString("base64").slice(0, 16)}`,
+              title,
+              dek: truncate(cleanSummary(snippet)),
+              fullContent: fullContent || truncate(snippet, 800),
+              link,
+              pubDate: item.pubDate || item.isoDate || new Date().toISOString(),
+              time: timeAgo(item.pubDate || item.isoDate || new Date()),
+              source: "InsuralIQ",
+              originPublisher: publisher || feed.source,
+              tag,
+              tagColor,
+              india: feed.india,
+              section: "bfsi",
+            });
+            bfsiKept++;
+          } else {
+            dropped++;
+          }
         }
-        sourceStats.push({ source: name, via, fetched: items.length, kept, dropped });
+        sourceStats.push({ source: name, via, fetched: items.length, kept, bfsiKept, dropped });
       } catch (err) {
         errors.push({ source: name, url: feed.url, error: err.message });
-        sourceStats.push({ source: name, via: "failed", fetched: 0, kept: 0, dropped: 0 });
+        sourceStats.push({ source: name, via: "failed", fetched: 0, kept: 0, bfsiKept: 0, dropped: 0 });
       }
     })
   );
 
-  return { results, errors, sourceStats };
+  return { results, bfsiResults, errors, sourceStats };
 }
 
 // ── Accumulated articles from previous rotations ──────────────
@@ -902,8 +1001,10 @@ async function fetchFromRSSFeeds() {
 // earlier rotations and merge new ones in. This builds a rich pool
 // throughout the day. Articles older than 48h are auto-pruned.
 let accumulatedArticles = [];
+let accumulatedBFSI = [];   // Separate pool for BFSI (non-insurance) articles
+let bfsiCache = [];          // Served via /api/bfsi
 let lastSourceStats = [];
-const BUILD_VERSION = "v8-quality";
+const BUILD_VERSION = "v8-bfsi";
 
 // ── Main Fetch (API first → RSS fallback → Seed fallback) ─────
 async function fetchAllFeeds() {
@@ -937,7 +1038,7 @@ async function fetchAllFeeds() {
 
   // Step 3: RSS feeds — Google News + direct publishers (biggest source)
   console.log(`  📡 [3/3] RSS feeds (${FEEDS.length} sources)...`);
-  const { results: rssResults, errors: rssErrors, sourceStats } = await fetchFromRSSFeeds();
+  const { results: rssResults, bfsiResults: rssBFSI, errors: rssErrors, sourceStats } = await fetchFromRSSFeeds();
   errors = rssErrors;
   lastSourceStats = sourceStats;
 
@@ -946,7 +1047,7 @@ async function fetchAllFeeds() {
     if (!newsSource || newsSource === "none") newsSource = "rss";
     const okCount = sourceStats.filter((s) => s.via !== "failed").length;
     const viaProxy = sourceStats.filter((s) => s.via && s.via.startsWith("proxy")).length;
-    console.log(`  ✅ Got ${rssResults.length} articles from ${okCount}/${FEEDS.length} feeds (${viaProxy} via proxy)`);
+    console.log(`  ✅ Got ${rssResults.length} insurance + ${rssBFSI.length} BFSI articles from ${okCount}/${FEEDS.length} feeds (${viaProxy} via proxy)`);
   }
 
   if (rssErrors.length > 0) {
@@ -956,6 +1057,11 @@ async function fetchAllFeeds() {
 
   // Merge new articles into the accumulated pool
   accumulatedArticles = [...newResults, ...accumulatedArticles];
+
+  // Merge BFSI articles into the BFSI pool
+  if (rssBFSI.length > 0) {
+    accumulatedBFSI = [...rssBFSI, ...accumulatedBFSI];
+  }
 
   // Prune articles older than 48 hours from the pool
   const cutoff48h = new Date(Date.now() - 48 * 60 * 60 * 1000);
@@ -975,6 +1081,19 @@ async function fetchAllFeeds() {
     return true;
   });
   accumulatedArticles = deduped; // keep the deduped version
+
+  // ── BFSI pool: same pruning + dedup ──
+  accumulatedBFSI = accumulatedBFSI.filter(a => new Date(a.pubDate) >= cutoff48h);
+  accumulatedBFSI.sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate));
+  const bfsiSeen = new Set();
+  accumulatedBFSI = accumulatedBFSI.filter(item => {
+    const key = item.title.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 40);
+    if (bfsiSeen.has(key)) return false;
+    bfsiSeen.add(key);
+    return true;
+  });
+  bfsiCache = accumulatedBFSI;
+  console.log(`  📊 BFSI pool: ${bfsiCache.length} articles`);
 
   // Auto-expire curated articles older than 48 hours
   const now = new Date();
@@ -1086,6 +1205,62 @@ app.get("/api/news", (req, res) => {
   });
 });
 
+// GET /api/bfsi — BFSI (non-insurance financial) news feed
+app.get("/api/bfsi", (req, res) => {
+  let items = [...bfsiCache];
+
+  // Fresh filter (same logic as /api/news)
+  const daysBack = parseInt(req.query.days) || 2;
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - daysBack);
+  cutoff.setHours(0, 0, 0, 0);
+  const freshItems = items.filter(i => new Date(i.pubDate) >= cutoff);
+  if (freshItems.length >= 4) {
+    items = freshItems;
+  } else {
+    // Widen to get at least some articles
+    for (const d of [3, 5, 7, 14]) {
+      const c = new Date();
+      c.setDate(c.getDate() - d);
+      c.setHours(0, 0, 0, 0);
+      const wider = bfsiCache.filter(i => new Date(i.pubDate) >= c);
+      if (wider.length >= 4) { items = wider; break; }
+    }
+  }
+
+  // Tag filter
+  if (req.query.tag) {
+    items = items.filter(i => i.tag.toLowerCase() === req.query.tag.toLowerCase());
+  }
+  if (req.query.search) {
+    const q = req.query.search.toLowerCase();
+    items = items.filter(i => i.title.toLowerCase().includes(q) || i.dek.toLowerCase().includes(q));
+  }
+
+  const total = items.length;
+  const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+  const offset = parseInt(req.query.offset) || 0;
+  items = items.slice(offset, offset + limit);
+  items = items.map(i => ({ ...i, time: timeAgo(i.pubDate) }));
+
+  res.json({ ok: true, total, limit, offset, lastFetched: lastFetchTime, articles: items });
+});
+
+// GET /api/bfsi/tags — BFSI tag breakdown
+app.get("/api/bfsi/tags", (req, res) => {
+  const counts = {};
+  bfsiCache.forEach(item => {
+    counts[item.tag] = (counts[item.tag] || 0) + 1;
+  });
+  const tags = Object.entries(counts)
+    .map(([tag, count]) => {
+      const rule = BFSI_TAG_RULES.find(r => r.tag === tag);
+      return { tag, count, color: rule?.color || "#5B6B70" };
+    })
+    .sort((a, b) => b.count - a.count);
+  res.json({ ok: true, tags });
+});
+
 // GET /api/tags — available tags with counts
 app.get("/api/tags", (req, res) => {
   const counts = {};
@@ -1109,6 +1284,7 @@ app.get("/api/status", (req, res) => {
     ok: true,
     build: BUILD_VERSION,
     articleCount: newsCache.length,
+    bfsiCount: bfsiCache.length,
     todayCount,
     curatedCount: curatedArticles.length,
     lastFetched: lastFetchTime,
