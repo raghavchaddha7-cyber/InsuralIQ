@@ -24,16 +24,22 @@ app.use(cors());
 // Sign up at https://newsdata.io to get your API key
 const NEWSDATA_API_KEY = process.env.NEWSDATA_API_KEY || "";
 
-// ── Trusted Domains (credible sources only) ───────────────────
-// We restrict API results to these reputable publications so
-// InsuralIQ never shows random blog spam or irrelevant sources.
-const TRUSTED_DOMAINS = [
-  "economictimes.indiatimes.com",
+// ── Source Quality Control ─────────────────────────────────────
+// STRATEGY: Blocklist + stricter relevance for unknown sources.
+// A whitelist killed results (NewsData.io free tier doesn't index
+// all premium domains). Instead we:
+//  1. Block known junk/spam domains
+//  2. Accept articles from known trusted domains with 2+ keyword matches
+//  3. Accept articles from unknown domains with 3+ keyword matches
+//     (higher bar = less risk of irrelevant content slipping through)
+
+const TRUSTED_DOMAINS = new Set([
+  "economictimes.indiatimes.com", "economictimes.com",
   "livemint.com",
   "moneycontrol.com",
   "business-standard.com",
   "thehindubusinessline.com",
-  "ndtvprofit.com",
+  "ndtvprofit.com", "ndtv.com",
   "reuters.com",
   "financialexpress.com",
   "insurancedekho.com",
@@ -43,7 +49,41 @@ const TRUSTED_DOMAINS = [
   "insurancetimes.co.uk",
   "theinsurancetimes.in",
   "covermagazine.co.uk",
-].join(",");
+  "hindustantimes.com",
+  "thehindu.com",
+  "deccanherald.com",
+  "news18.com",
+  "india.com",
+  "outlookindia.com",
+  "firstpost.com",
+  "zeebiz.com",
+  "cnbctv18.com",
+  "bloombergquint.com",
+]);
+
+const BLOCKED_DOMAINS = new Set([
+  "youtube.com", "twitter.com", "x.com", "facebook.com",
+  "instagram.com", "reddit.com", "tiktok.com",
+  "pinterest.com", "quora.com", "medium.com",
+  "blogspot.com", "wordpress.com", "tumblr.com",
+  "wikipedia.org",
+]);
+
+function isDomainTrusted(sourceUrl) {
+  if (!sourceUrl) return false;
+  try {
+    const host = new URL(sourceUrl).hostname.replace(/^www\./, "");
+    return TRUSTED_DOMAINS.has(host);
+  } catch { return false; }
+}
+
+function isDomainBlocked(sourceUrl) {
+  if (!sourceUrl) return false;
+  try {
+    const host = new URL(sourceUrl).hostname.replace(/^www\./, "");
+    return BLOCKED_DOMAINS.has(host);
+  } catch { return false; }
+}
 
 // Search queries — strictly insurance-focused (uses 1 credit each)
 // Queries are ROTATED — only 2 run per cycle to conserve credits
@@ -384,8 +424,8 @@ async function fetchFromNewsDataAPI() {
 
   for (const query of queriesToRun) {
     try {
-      // domain= restricts to trusted publications only
-      const url = `https://newsdata.io/api/1/latest?apikey=${NEWSDATA_API_KEY}&q=${encodeURIComponent(query.q)}&country=in&language=en&size=10&domain=${TRUSTED_DOMAINS}`;
+      // No domain= filter — we use blocklist + relevance gate instead
+      const url = `https://newsdata.io/api/1/latest?apikey=${NEWSDATA_API_KEY}&q=${encodeURIComponent(query.q)}&country=in&language=en&size=10`;
 
       const data = await new Promise((resolve, reject) => {
         const req = https.get(url, { timeout: 15000 }, (res) => {
@@ -404,14 +444,31 @@ async function fetchFromNewsDataAPI() {
       });
 
       if (data.status === "success" && data.results) {
-        let accepted = 0, rejected = 0;
+        let accepted = 0, rejected = 0, blocked = 0;
         for (const item of data.results) {
           const title = item.title || "";
           const description = item.description || "";
           const content = item.content || item.description || "";
+          const articleUrl = item.link || "";
 
-          // ── RELEVANCE GATE: reject non-insurance articles ──
-          if (!isInsuranceRelevant(title, description, content)) {
+          // ── BLOCK known junk domains ──
+          if (isDomainBlocked(articleUrl)) {
+            blocked++;
+            continue;
+          }
+
+          // ── RELEVANCE GATE ──
+          // Trusted sources: need 2+ insurance keywords
+          // Unknown sources: need 3+ (higher bar for credibility)
+          const trusted = isDomainTrusted(articleUrl);
+          const threshold = trusted ? 2 : 3;
+          const text = `${title} ${description} ${content}`.toLowerCase();
+          let matchCount = 0;
+          for (const kw of INSURANCE_KEYWORDS) {
+            if (text.includes(kw)) matchCount++;
+            if (matchCount >= threshold) break; // early exit
+          }
+          if (matchCount < threshold) {
             rejected++;
             continue;
           }
@@ -424,18 +481,19 @@ async function fetchFromNewsDataAPI() {
             title: title,
             dek: truncate(cleanSummary(description), 160),
             fullContent: cleanContent,
-            link: item.link || "",
+            link: articleUrl,
             pubDate: item.pubDate || new Date().toISOString(),
             time: timeAgo(item.pubDate || new Date()),
             source: "InsuralIQ",
             tag,
             tagColor,
             india: true,
+            trusted,
             concepts: detectConcepts(`${title} ${cleanContent}`),
           });
           accepted++;
         }
-        console.log(`  ✅ API query "${query.label}": ${accepted} accepted, ${rejected} rejected as irrelevant`);
+        console.log(`  ✅ API query "${query.label}": ${accepted} accepted, ${rejected} irrelevant, ${blocked} blocked`);
       } else if (data.status === "error") {
         console.log(`  ⚠ API query "${query.label}": ${data.results?.message || "Error"}`);
       }
@@ -679,7 +737,8 @@ app.get("/api/status", (req, res) => {
     curatedCount: curatedArticles.length,
     lastFetched: lastFetchTime,
     newsSource,
-    trustedDomains: TRUSTED_DOMAINS.split(",").length,
+    trustedDomains: TRUSTED_DOMAINS.size,
+    blockedDomains: BLOCKED_DOMAINS.size,
     queryRotation: `${queryRotationIndex}/${NEWSDATA_QUERIES.length}`,
     queriesPerCycle: QUERIES_PER_CYCLE,
     refreshInterval: "15 min",
@@ -941,7 +1000,7 @@ app.listen(PORT, async () => {
   console.log(`  │   GET /api/status   — health check     │`);
   console.log(`  └──────────────────────────────────────┘`);
   console.log(`  📡 NewsData.io API key: ${NEWSDATA_API_KEY ? "✅ Configured" : "❌ Not set (using RSS only)"}`);
-  console.log(`  🔒 Trusted domains: ${TRUSTED_DOMAINS.split(",").length} sources`);
+  console.log(`  🔒 Trusted domains: ${TRUSTED_DOMAINS.size} | Blocked: ${BLOCKED_DOMAINS.size}`);
   console.log(`  🔄 Rotation: ${QUERIES_PER_CYCLE} queries per cycle, ${NEWSDATA_QUERIES.length} total`);
   console.log(`  💰 Est. daily credits: ~${QUERIES_PER_CYCLE * 96} / 200\n`);
 
