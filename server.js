@@ -1,8 +1,10 @@
-// ── InsuralIQ News Backend ──────────────────────────────────────
-// Dual-API news engine:
-//   1. NewsData.io  (primary)  — 200 credits/day, rotated queries
-//   2. APITube.io   (secondary) — 1000 req/day, insurance-focused
-// Both feed into a unified relevance gate + quality pipeline.
+// ── InsuralIQ News Backend (v8-quality) ────────────────────────
+// Multi-source news engine with strict relevance gate:
+//   1. Google News RSS (free, unlimited) — 16 insurance queries
+//   2. NewsData.io  (primary API) — 200 credits/day, rotated
+//   3. APITube.io   (secondary API) — 1000 req/day
+//   4. Direct publisher RSS (ET, Mint, BS, MC, FE, etc.)
+// ALL sources go through keyword relevance gate — no exceptions.
 // ────────────────────────────────────────────────────────────────
 
 const express = require("express");
@@ -148,14 +150,14 @@ const DIRECT_FEEDS = [
   { url: "https://economictimes.indiatimes.com/industry/banking/finance/rssfeeds/13358259.cms", source: "ET BFSI", defaultTag: "BFSI", india: true, scoped: false },
 ];
 
-// Combined feed list: Google News (scoped) + direct publisher feeds
+// Combined feed list: Google News (NOT scoped — results are broad) + direct publisher feeds
 const FEEDS = [
   ...GOOGLE_NEWS_QUERIES.map((g) => ({
     url: googleNewsUrl(g.q),
     source: "Google News",
     defaultTag: g.tag,
     india: true,
-    scoped: true,
+    scoped: false,       // Google News returns broad results; MUST go through relevance gate
     label: g.q.slice(0, 38),
   })),
   ...DIRECT_FEEDS,
@@ -850,16 +852,19 @@ async function fetchFromRSSFeeds() {
           if (isDomainBlocked(link)) { dropped++; continue; }
 
           // ── TIERED RELEVANCE GATE ──
-          // scoped feed  → already insurance-only, accept as-is
-          // general feed → require 2 keyword matches
-          if (!feed.scoped) {
+          // Every article must have at least SOME insurance keyword match.
+          // Thresholds:
+          //   scoped feed (ET Insurance, Livemint Insurance, etc.) → 1 keyword (safety net)
+          //   general feed / Google News → 2 keywords
+          {
+            const threshold = feed.scoped ? 1 : 2;
             const text = `${title} ${snippet} ${fullContent}`.toLowerCase();
             let n = 0;
             for (const kw of INSURANCE_KEYWORDS) {
               if (text.includes(kw)) n++;
-              if (n >= 2) break;
+              if (n >= threshold) break;
             }
-            if (n < 2) { dropped++; continue; }
+            if (n < threshold) { dropped++; continue; }
           }
 
           const { tag, tagColor } = assignTag(title, snippet, feed.defaultTag);
@@ -898,7 +903,7 @@ async function fetchFromRSSFeeds() {
 // throughout the day. Articles older than 48h are auto-pruned.
 let accumulatedArticles = [];
 let lastSourceStats = [];
-const BUILD_VERSION = "v7-multisource";
+const BUILD_VERSION = "v8-quality";
 
 // ── Main Fetch (API first → RSS fallback → Seed fallback) ─────
 async function fetchAllFeeds() {
