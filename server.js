@@ -1,7 +1,8 @@
 // ── InsuralIQ News Backend ──────────────────────────────────────
-// Aggregates Indian insurance & BFSI news from NewsData.io API
-// (primary) + RSS feeds (fallback), auto-tags articles, and
-// serves them as a clean JSON API.
+// Dual-API news engine:
+//   1. NewsData.io  (primary)  — 200 credits/day, rotated queries
+//   2. APITube.io   (secondary) — 1000 req/day, insurance-focused
+// Both feed into a unified relevance gate + quality pipeline.
 // ────────────────────────────────────────────────────────────────
 
 const express = require("express");
@@ -19,10 +20,9 @@ const parser = new Parser({
 
 app.use(cors());
 
-// ── NewsData.io API Configuration ──────────────────────────────
-// Free tier: 200 credits/day, 10 results per request
-// Sign up at https://newsdata.io to get your API key
+// ── API Keys ──────────────────────────────────────────────────
 const NEWSDATA_API_KEY = process.env.NEWSDATA_API_KEY || "";
+const APITUBE_API_KEY = process.env.APITUBE_API_KEY || "";
 
 // ── Source Quality Control ─────────────────────────────────────
 // STRATEGY: Blocklist + stricter relevance for unknown sources.
@@ -235,37 +235,153 @@ function detectConcepts(text) {
 }
 
 // ── Relevance Gate ─────────────────────────────────────────────
-// Only allow articles that are genuinely about insurance/BFSI
-// This prevents political news, cricket scores, etc. from appearing
+// 200+ insurance keywords — the most comprehensive filter possible.
+// An article must match 2+ keywords (trusted source) or 3+ (unknown
+// source) to appear on InsuralIQ. This is what keeps quality high.
 const INSURANCE_KEYWORDS = [
-  "insurance", "insurer", "insured", "insuring",
-  "irdai", "policyholder", "policy holder", "claim settlement",
-  "premium", "underwriting", "underwriter", "actuary", "actuarial",
-  "life cover", "health cover", "motor cover", "term plan",
-  "endowment", "ulip", "annuity", "pension plan",
-  "reinsurance", "reinsurer", "lic ", "lic'", "gic re",
-  "sum assured", "sum insured", "death benefit", "maturity benefit",
-  "surrender value", "paid-up", "cashless", "mediclaim",
+  // ── Core insurance terms ──
+  "insurance", "insurer", "insured", "insuring", "insurers",
+  "insurance policy", "insurance cover", "insurance plan",
+  "insurance premium", "insurance claim", "insurance sector",
+  "insurance industry", "insurance market", "insurance business",
+  "insurance company", "insurance regulation", "insurance act",
+  "insurance penetration", "insurance density", "insurance fraud",
+
+  // ── Regulator & governance ──
+  "irdai", "irda", "insurance regulatory",
+  "policyholder", "policy holder", "policyholders",
+  "claim settlement", "claim ratio", "claims paid",
+  "solvency ratio", "solvency margin", "capital adequacy",
+  "loss ratio", "combined ratio", "incurred claim ratio",
+  "grievance redressal", "ombudsman", "insurance ombudsman",
+  "bima sugam", "bima vistaar", "bima vahak",
+
+  // ── Life insurance ──
+  "life insurance", "life insurer", "life cover",
+  "term plan", "term insurance", "term life",
+  "endowment", "endowment plan", "money back plan",
+  "ulip", "unit linked", "pension plan", "annuity",
+  "whole life", "child plan", "retirement plan",
+  "sum assured", "sum insured", "death benefit",
+  "maturity benefit", "survival benefit", "bonus",
+  "surrender value", "paid-up", "paid up value",
+  "nomination", "assignment", "free look period",
+  "mortality charge", "fund value", "nav",
+  "participating plan", "non-participating",
+
+  // ── Health insurance ──
+  "health insurance", "health cover", "health plan",
+  "mediclaim", "cashless", "cashless claim",
+  "hospitalisation", "hospitalization", "hospital",
+  "tpa", "third party administrator",
+  "pre-existing", "pre existing disease", "waiting period",
+  "copayment", "co-payment", "deductible", "sub-limit",
+  "daycare procedure", "domiciliary", "room rent",
+  "no claim bonus", "cumulative bonus",
+  "top-up plan", "super top-up", "critical illness",
+  "personal accident", "group health",
+  "ayushman bharat", "ayushman", "pmjay", "ab-pmjay",
+  "niva bupa", "star health", "care health",
+  "arogya sanjeevani", "health id",
+
+  // ── Motor insurance ──
+  "motor insurance", "vehicle insurance", "car insurance",
+  "two wheeler insurance", "bike insurance",
   "third party", "own damage", "comprehensive cover",
-  "solvency", "claim ratio", "loss ratio", "combined ratio",
-  "bancassurance", "bima sugam", "ayushman", "pmjay", "pmfby",
-  "crop insurance", "fire insurance", "marine insurance",
-  "cyber insurance", "travel insurance", "home insurance",
-  "liability insurance", "product liability",
-  "general insurance", "life insurance", "health insurance",
-  "motor insurance", "vehicle insurance",
-  "insurance sector", "insurance industry", "insurance market",
-  "insurance company", "insurance business", "insurance regulation",
-  "new india assurance", "united india", "oriental insurance",
-  "star health", "care health", "niva bupa", "max life",
-  "hdfc life", "icici prudential", "sbi life", "bajaj allianz",
-  "tata aia", "kotak life", "hdfc ergo", "icici lombard",
-  "digit insurance", "acko", "policybazaar", "go digit",
-  "insurance penetration", "insurance density",
-  "risk cover", "risk management", "risk transfer",
+  "idv", "insured declared value", "zero depreciation",
+  "no claim bonus", "ncb", "add-on cover",
+  "roadside assistance", "engine protection",
+  "motor vehicles act", "motor tariff",
+
+  // ── General / specialty insurance ──
+  "general insurance", "non-life insurance",
+  "fire insurance", "marine insurance", "cargo insurance",
+  "crop insurance", "pmfby", "pradhan mantri fasal bima",
+  "weather insurance", "parametric insurance",
+  "travel insurance", "home insurance", "property insurance",
+  "cyber insurance", "cyber risk", "data breach insurance",
+  "liability insurance", "professional indemnity",
+  "product liability", "directors and officers",
+  "engineering insurance", "construction insurance",
+  "aviation insurance", "satellite insurance",
+  "credit insurance", "trade credit", "surety bond",
+  "title insurance", "pet insurance", "warranty insurance",
+  "embedded insurance", "sachet insurance",
+  "microinsurance", "group insurance", "takaful",
+
+  // ── Reinsurance ──
+  "reinsurance", "reinsurer", "treaty", "facultative",
+  "retrocession", "catastrophe bond", "cat bond",
+  "excess of loss", "quota share", "proportional treaty",
+  "gic re", "swiss re", "munich re", "lloyd",
+  "scor", "hannover re", "berkshire hathaway",
+
+  // ── Distribution & intermediary ──
   "insurance agent", "insurance broker", "insurance intermediary",
-  "fdi in insurance", "insurance ipo", "insurtech",
-  "takaful", "microinsurance", "group insurance",
+  "corporate agent", "web aggregator", "posp",
+  "point of sale person", "bancassurance", "banca",
+  "insurance distribution", "agency channel",
+  "policybazaar", "insurancedekho", "coverfox",
+  "turtlemint", "ditto insurance",
+
+  // ── Underwriting & actuarial ──
+  "underwriting", "underwriter", "underwritten",
+  "actuary", "actuarial", "risk assessment",
+  "risk scoring", "risk pricing", "mortality table",
+  "morbidity", "experience rating", "rate making",
+  "risk pooling", "risk selection", "adverse selection",
+  "moral hazard", "insurable interest", "utmost good faith",
+  "subrogation", "indemnity", "contribution",
+  "proximate cause", "material fact",
+
+  // ── InsurTech & digital ──
+  "insurtech", "insuretech", "insurance technology",
+  "digital insurance", "telematics", "usage based",
+  "pay as you drive", "pay how you drive",
+  "ai in insurance", "machine learning insurance",
+  "blockchain insurance", "smart contract insurance",
+  "robo advisory", "chatbot insurance",
+  "acko", "go digit", "digit insurance", "toffee insurance",
+  "plum insurance", "razorpay insurance", "onsurity",
+
+  // ── Major Indian insurers ──
+  "lic", "life insurance corporation",
+  "hdfc life", "hdfc ergo", "icici prudential", "icici lombard",
+  "sbi life", "sbi general", "bajaj allianz",
+  "tata aia", "max life", "kotak life", "kotak general",
+  "new india assurance", "united india insurance",
+  "oriental insurance", "national insurance company",
+  "reliance general", "future generali", "royal sundaram",
+  "iffco tokio", "universal sompo", "shriram general",
+  "aditya birla health", "aditya birla sun life",
+  "canara hsbc", "exide life", "ageas federal",
+  "pramerica", "aegon", "aviva", "bharti axa",
+  "indiaFirst life", "indiafirst",
+  "bnp paribas cardif", "edelweiss tokio",
+
+  // ── International insurers ──
+  "allianz", "axa", "zurich insurance", "prudential",
+  "metlife", "generali", "manulife", "sun life",
+  "chubb", "aig", "marsh", "aon", "willis towers",
+
+  // ── Market & M&A ──
+  "insurance ipo", "insurer ipo", "lic ipo", "insurance listing",
+  "fdi in insurance", "foreign direct investment insurance",
+  "insurance acquisition", "insurer merger",
+  "insurance stake", "insurance joint venture",
+  "insurance valuation", "embedded value",
+
+  // ── Risk & claims ──
+  "risk cover", "risk management", "risk transfer",
+  "risk mitigation", "enterprise risk",
+  "claim denied", "claim rejected", "claim fraud",
+  "insurance fraud", "claim process",
+
+  // ── Premium & financial terms ──
+  "premium", "premiums", "gross written premium",
+  "net premium", "renewal premium", "single premium",
+  "regular premium", "limited premium",
+  "rider", "riders", "add-on", "add-ons",
 ];
 
 function isInsuranceRelevant(title, description, content) {
@@ -504,6 +620,131 @@ async function fetchFromNewsDataAPI() {
   return results;
 }
 
+// ── APITube.io Search Queries ─────────────────────────────────
+// Comprehensive insurance-focused queries for the secondary API.
+// APITube supports title= parameter for keyword search.
+// We rotate through these to maximize coverage.
+const APITUBE_QUERIES = [
+  { title: "insurance IRDAI", label: "Insurance + IRDAI" },
+  { title: "life insurance India", label: "Life Insurance" },
+  { title: "health insurance India", label: "Health Insurance" },
+  { title: "motor insurance India", label: "Motor Insurance" },
+  { title: "insurtech India", label: "InsurTech" },
+  { title: "reinsurance India", label: "Reinsurance" },
+  { title: "insurance claim settlement", label: "Claims" },
+  { title: "insurance premium India", label: "Premiums" },
+  { title: "crop insurance PMFBY", label: "Crop Insurance" },
+  { title: "insurance FDI acquisition", label: "M&A + FDI" },
+];
+
+let apitubeRotationIndex = 0;
+const APITUBE_QUERIES_PER_CYCLE = 3; // 3 queries per cycle
+
+// ── APITube.io API Fetch ──────────────────────────────────────
+async function fetchFromAPITube() {
+  if (!APITUBE_API_KEY) return [];
+
+  const results = [];
+  const https = require("https");
+
+  // Pick next queries from rotation
+  const queriesToRun = [];
+  for (let i = 0; i < APITUBE_QUERIES_PER_CYCLE; i++) {
+    queriesToRun.push(APITUBE_QUERIES[apitubeRotationIndex]);
+    apitubeRotationIndex = (apitubeRotationIndex + 1) % APITUBE_QUERIES.length;
+  }
+
+  console.log(`  🔄 APITube queries: ${queriesToRun.map(q => q.label).join(" + ")}`);
+
+  for (const query of queriesToRun) {
+    try {
+      const params = new URLSearchParams({
+        title: query.title,
+        "language.code": "en",
+        per_page: "10",
+        "source.rank.opr.min": "0.3", // minimum source quality
+      });
+      const url = `https://api.apitube.io/v1/news/everything?${params.toString()}`;
+
+      const data = await new Promise((resolve, reject) => {
+        const req = https.get(url, {
+          timeout: 15000,
+          headers: { "X-API-Key": APITUBE_API_KEY },
+        }, (res) => {
+          let body = "";
+          res.on("data", (chunk) => (body += chunk));
+          res.on("end", () => {
+            try {
+              resolve(JSON.parse(body));
+            } catch (e) {
+              reject(new Error("Invalid JSON response"));
+            }
+          });
+        });
+        req.on("error", reject);
+        req.on("timeout", () => { req.destroy(); reject(new Error("Timeout")); });
+      });
+
+      if (data.results && Array.isArray(data.results)) {
+        let accepted = 0, rejected = 0, blocked = 0;
+        for (const item of data.results) {
+          const title = item.title || "";
+          const description = item.description || "";
+          const content = item.content || item.description || "";
+          const articleUrl = item.href || item.link || "";
+
+          // ── BLOCK known junk domains ──
+          if (isDomainBlocked(articleUrl)) {
+            blocked++;
+            continue;
+          }
+
+          // ── RELEVANCE GATE ──
+          const trusted = isDomainTrusted(articleUrl);
+          const threshold = trusted ? 2 : 3;
+          const text = `${title} ${description} ${content}`.toLowerCase();
+          let matchCount = 0;
+          for (const kw of INSURANCE_KEYWORDS) {
+            if (text.includes(kw)) matchCount++;
+            if (matchCount >= threshold) break;
+          }
+          if (matchCount < threshold) {
+            rejected++;
+            continue;
+          }
+
+          const { tag, tagColor } = assignTag(title, description, "Insurance");
+          const cleanContent = cleanSummary(content) || cleanSummary(description);
+
+          results.push({
+            id: `at_${Buffer.from(title).toString("base64").slice(0, 16)}`,
+            title: title,
+            dek: truncate(cleanSummary(description), 160),
+            fullContent: cleanContent,
+            link: articleUrl,
+            pubDate: item.published_at || new Date().toISOString(),
+            time: timeAgo(item.published_at || new Date()),
+            source: "InsuralIQ",
+            tag,
+            tagColor,
+            india: true,
+            trusted,
+            concepts: detectConcepts(`${title} ${cleanContent}`),
+          });
+          accepted++;
+        }
+        console.log(`  ✅ APITube "${query.label}": ${accepted} accepted, ${rejected} irrelevant, ${blocked} blocked`);
+      } else {
+        const errMsg = data.error || data.message || "No results";
+        console.log(`  ⚠ APITube "${query.label}": ${errMsg}`);
+      }
+    } catch (err) {
+      console.log(`  ⚠ APITube "${query.label}": ${err.message}`);
+    }
+  }
+  return results;
+}
+
 // ── RSS Feed Fetch ─────────────────────────────────────────────
 async function fetchFromRSSFeeds() {
   const results = [];
@@ -561,25 +802,36 @@ async function fetchAllFeeds() {
   let newResults = [];
   let errors = [];
 
-  // Step 1: Try NewsData.io API (rotated queries, trusted domains)
+  // Step 1: Try NewsData.io API (rotated queries)
   if (NEWSDATA_API_KEY) {
-    console.log("  📡 Trying NewsData.io API (trusted sources only)...");
+    console.log("  📡 [1/3] NewsData.io API...");
     const apiResults = await fetchFromNewsDataAPI();
     if (apiResults.length > 0) {
-      newResults = apiResults;
+      newResults = [...newResults, ...apiResults];
       newsSource = "api";
-      console.log(`  ✅ Got ${apiResults.length} new articles from API`);
+      console.log(`  ✅ Got ${apiResults.length} articles from NewsData.io`);
     }
   }
 
-  // Step 2: Also try RSS feeds (may add more articles)
-  console.log("  📡 Trying RSS feeds...");
+  // Step 2: Try APITube.io API (rotated queries)
+  if (APITUBE_API_KEY) {
+    console.log("  📡 [2/3] APITube.io API...");
+    const apitubeResults = await fetchFromAPITube();
+    if (apitubeResults.length > 0) {
+      newResults = [...newResults, ...apitubeResults];
+      if (newsSource !== "api") newsSource = "apitube";
+      console.log(`  ✅ Got ${apitubeResults.length} articles from APITube`);
+    }
+  }
+
+  // Step 3: Also try RSS feeds (bonus articles if they work)
+  console.log("  📡 [3/3] RSS feeds...");
   const { results: rssResults, errors: rssErrors } = await fetchFromRSSFeeds();
   errors = rssErrors;
 
   if (rssResults.length > 0) {
     newResults = [...newResults, ...rssResults];
-    if (newsSource !== "api") newsSource = "rss";
+    if (!newsSource || newsSource === "none") newsSource = "rss";
     console.log(`  ✅ Got ${rssResults.length} articles from RSS`);
   }
 
@@ -729,7 +981,6 @@ app.get("/api/tags", (req, res) => {
 app.get("/api/status", (req, res) => {
   const today = new Date().toDateString();
   const todayCount = newsCache.filter(a => new Date(a.pubDate).toDateString() === today).length;
-  const creditsUsedEstimate = queryRotationIndex > 0 ? queryRotationIndex : NEWSDATA_QUERIES.length;
   res.json({
     ok: true,
     articleCount: newsCache.length,
@@ -737,16 +988,21 @@ app.get("/api/status", (req, res) => {
     curatedCount: curatedArticles.length,
     lastFetched: lastFetchTime,
     newsSource,
-    trustedDomains: TRUSTED_DOMAINS.size,
-    blockedDomains: BLOCKED_DOMAINS.size,
-    queryRotation: `${queryRotationIndex}/${NEWSDATA_QUERIES.length}`,
-    queriesPerCycle: QUERIES_PER_CYCLE,
+    apis: {
+      newsdata: { configured: !!NEWSDATA_API_KEY, rotation: `${queryRotationIndex}/${NEWSDATA_QUERIES.length}`, perCycle: QUERIES_PER_CYCLE },
+      apitube: { configured: !!APITUBE_API_KEY, rotation: `${apitubeRotationIndex}/${APITUBE_QUERIES.length}`, perCycle: APITUBE_QUERIES_PER_CYCLE },
+    },
+    qualityControl: {
+      trustedDomains: TRUSTED_DOMAINS.size,
+      blockedDomains: BLOCKED_DOMAINS.size,
+      insuranceKeywords: INSURANCE_KEYWORDS.length,
+      trustedThreshold: 2,
+      unknownThreshold: 3,
+    },
     refreshInterval: "15 min",
-    estimatedDailyCredits: `~${QUERIES_PER_CYCLE * 96}/day (limit: 200)`,
     feedCount: FEEDS.length,
     feedErrors: fetchErrors.length,
     usingSeedData: usingSeed,
-    hasAPIKey: !!NEWSDATA_API_KEY,
     errors: fetchErrors,
   });
 });
@@ -999,15 +1255,14 @@ app.listen(PORT, async () => {
   console.log(`  │   GET /api/tags     — tag breakdown    │`);
   console.log(`  │   GET /api/status   — health check     │`);
   console.log(`  └──────────────────────────────────────┘`);
-  console.log(`  📡 NewsData.io API key: ${NEWSDATA_API_KEY ? "✅ Configured" : "❌ Not set (using RSS only)"}`);
-  console.log(`  🔒 Trusted domains: ${TRUSTED_DOMAINS.size} | Blocked: ${BLOCKED_DOMAINS.size}`);
-  console.log(`  🔄 Rotation: ${QUERIES_PER_CYCLE} queries per cycle, ${NEWSDATA_QUERIES.length} total`);
-  console.log(`  💰 Est. daily credits: ~${QUERIES_PER_CYCLE * 96} / 200\n`);
+  console.log(`  📡 NewsData.io: ${NEWSDATA_API_KEY ? "✅ Key set" : "❌ No key"} | ${QUERIES_PER_CYCLE} queries/cycle × ${NEWSDATA_QUERIES.length} total`);
+  console.log(`  📡 APITube.io:  ${APITUBE_API_KEY ? "✅ Key set" : "❌ No key"} | ${APITUBE_QUERIES_PER_CYCLE} queries/cycle × ${APITUBE_QUERIES.length} total`);
+  console.log(`  🔒 Quality: ${TRUSTED_DOMAINS.size} trusted domains | ${BLOCKED_DOMAINS.size} blocked | ${INSURANCE_KEYWORDS.length} keywords`);
+  console.log(`  ⏱  Refresh: every 15 min\n`);
 
   // Initial fetch on startup
   await fetchAllFeeds();
 
-  // Refresh every 15 minutes with 2-query rotation
-  // ~192 credits/day (well within 200 limit)
+  // Refresh every 15 minutes — dual API rotation
   cron.schedule("*/15 * * * *", fetchAllFeeds);
 });
