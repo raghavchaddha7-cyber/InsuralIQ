@@ -24,7 +24,29 @@ app.use(cors());
 // Sign up at https://newsdata.io to get your API key
 const NEWSDATA_API_KEY = process.env.NEWSDATA_API_KEY || "";
 
+// ── Trusted Domains (credible sources only) ───────────────────
+// We restrict API results to these reputable publications so
+// InsuralIQ never shows random blog spam or irrelevant sources.
+const TRUSTED_DOMAINS = [
+  "economictimes.indiatimes.com",
+  "livemint.com",
+  "moneycontrol.com",
+  "business-standard.com",
+  "thehindubusinessline.com",
+  "ndtvprofit.com",
+  "reuters.com",
+  "financialexpress.com",
+  "insurancedekho.com",
+  "policybazaar.com",
+  "bimabazaar.com",
+  "asiainsurancereview.com",
+  "insurancetimes.co.uk",
+  "theinsurancetimes.in",
+  "covermagazine.co.uk",
+].join(",");
+
 // Search queries — strictly insurance-focused (uses 1 credit each)
+// Queries are ROTATED — only 2 run per cycle to conserve credits
 const NEWSDATA_QUERIES = [
   { q: "insurance IRDAI India", label: "Insurance + IRDAI" },
   { q: "life insurance OR health insurance India", label: "Life + Health Insurance" },
@@ -34,6 +56,12 @@ const NEWSDATA_QUERIES = [
   { q: "insurance acquisition OR insurance FDI OR insurer merger India", label: "M&A + FDI" },
   { q: "\"Bajaj Allianz\" OR \"SBI Life\" OR \"IndiaFirst\" OR \"Digit\" insurance", label: "More Insurers" },
 ];
+
+// ── Query Rotation State ──────────────────────────────────────
+// Runs 2 queries per 15-min cycle, rotating through all 7.
+// Full rotation every ~1 hour. Uses ~192 credits/day (within 200 limit).
+let queryRotationIndex = 0;
+const QUERIES_PER_CYCLE = 2;
 
 // ── RSS Feed Sources (fallback) ────────────────────────────────
 const FEEDS = [
@@ -324,23 +352,9 @@ SEED_ARTICLES.forEach((a, i) => { a.id = `seed_${i}`; a.pubDate = new Date(Date.
 // ── Curated Articles (added by admin) ─────────────────────────
 // These are high-priority articles added manually by the editor
 // They always appear and are never filtered out
-let curatedArticles = [
-  {
-    id: "curated_bnp_paribas_2026",
-    title: "BNP Paribas Cardif to acquire 26% stake in IndiaFirst Life Insurance",
-    dek: "French insurance giant BNP Paribas Cardif agreed to acquire ~26% of IndiaFirst Life from Warburg Pincus, marking a significant FDI move under India's liberalised ownership regime.",
-    fullContent: "BNP Paribas Cardif, the insurance arm of French banking giant BNP Paribas, agreed on 24 July 2026 to acquire approximately 26% of IndiaFirst Life Insurance from private equity firm Warburg Pincus, subject to regulatory approvals from IRDAI and CCI. Post-deal, the shareholding structure will see Bank of Baroda holding ~65%, BNP Paribas Cardif ~26%, and Union Bank of India ~9%.\n\nThis acquisition is a strong early example of India's liberalised foreign ownership regime in insurance translating into actual strategic foreign insurer participation. With the government having raised the FDI cap to 100%, global insurers are actively exploring deeper involvement in the Indian market, and BNP Paribas Cardif's move signals confidence in India's insurance growth story.\n\nThe deal also strengthens the bancassurance channel — Bank of Baroda's vast branch network of 8,200+ branches provides a powerful distribution platform for IndiaFirst Life's products. BNP Paribas Cardif brings global insurance expertise, digital capabilities, and product innovation experience from operating in over 30 countries.\n\nFor the Indian insurance sector, this transaction highlights the growing attractiveness of mid-sized life insurers as acquisition targets. IndiaFirst Life, with its established bancassurance relationships and growing premium base, offers BNP Paribas a ready platform to scale its India operations without building from scratch.",
-    link: "#",
-    pubDate: new Date().toISOString(),
-    time: "Today",
-    source: "InsuralIQ",
-    tag: "Market",
-    tagColor: "#0A5A62",
-    india: true,
-    curated: true,
-    concepts: ["premium", "bancassurance", "fdi in insurance"],
-  },
-];
+let curatedArticles = [];
+// Curated articles auto-expire after 48 hours.
+// Add fresh ones via the admin panel at /admin
 
 // Admin password — set via environment variable for security
 const ADMIN_KEY = process.env.ADMIN_KEY || "insuraiq2026";
@@ -352,16 +366,26 @@ let fetchErrors = [];
 let usingSeed = false;
 let newsSource = "none"; // "api", "rss", "seed"
 
-// ── NewsData.io API Fetch ──────────────────────────────────────
+// ── NewsData.io API Fetch (with rotation + domain filter) ─────
 async function fetchFromNewsDataAPI() {
   if (!NEWSDATA_API_KEY) return [];
 
   const results = [];
   const https = require("https");
 
-  for (const query of NEWSDATA_QUERIES) {
+  // Pick the next QUERIES_PER_CYCLE queries from the rotation
+  const queriesToRun = [];
+  for (let i = 0; i < QUERIES_PER_CYCLE; i++) {
+    queriesToRun.push(NEWSDATA_QUERIES[queryRotationIndex]);
+    queryRotationIndex = (queryRotationIndex + 1) % NEWSDATA_QUERIES.length;
+  }
+
+  console.log(`  🔄 Running queries ${queriesToRun.map(q => q.label).join(" + ")} (rotation ${queryRotationIndex}/${NEWSDATA_QUERIES.length})`);
+
+  for (const query of queriesToRun) {
     try {
-      const url = `https://newsdata.io/api/1/latest?apikey=${NEWSDATA_API_KEY}&q=${encodeURIComponent(query.q)}&country=in&language=en&size=10`;
+      // domain= restricts to trusted publications only
+      const url = `https://newsdata.io/api/1/latest?apikey=${NEWSDATA_API_KEY}&q=${encodeURIComponent(query.q)}&country=in&language=en&size=10&domain=${TRUSTED_DOMAINS}`;
 
       const data = await new Promise((resolve, reject) => {
         const req = https.get(url, { timeout: 15000 }, (res) => {
@@ -465,22 +489,28 @@ async function fetchFromRSSFeeds() {
   return { results, errors };
 }
 
+// ── Accumulated articles from previous rotations ──────────────
+// Since we only fetch 2 queries per cycle, we keep articles from
+// earlier rotations and merge new ones in. This builds a rich pool
+// throughout the day. Articles older than 48h are auto-pruned.
+let accumulatedArticles = [];
+
 // ── Main Fetch (API first → RSS fallback → Seed fallback) ─────
 async function fetchAllFeeds() {
   const timestamp = new Date().toLocaleTimeString();
   console.log(`\n[${timestamp}] Fetching news...`);
 
-  let allResults = [];
+  let newResults = [];
   let errors = [];
 
-  // Step 1: Try NewsData.io API (always fresh, today's news)
+  // Step 1: Try NewsData.io API (rotated queries, trusted domains)
   if (NEWSDATA_API_KEY) {
-    console.log("  📡 Trying NewsData.io API...");
+    console.log("  📡 Trying NewsData.io API (trusted sources only)...");
     const apiResults = await fetchFromNewsDataAPI();
     if (apiResults.length > 0) {
-      allResults = apiResults;
+      newResults = apiResults;
       newsSource = "api";
-      console.log(`  ✅ Got ${apiResults.length} articles from API`);
+      console.log(`  ✅ Got ${apiResults.length} new articles from API`);
     }
   }
 
@@ -490,7 +520,7 @@ async function fetchAllFeeds() {
   errors = rssErrors;
 
   if (rssResults.length > 0) {
-    allResults = [...allResults, ...rssResults];
+    newResults = [...newResults, ...rssResults];
     if (newsSource !== "api") newsSource = "rss";
     console.log(`  ✅ Got ${rssResults.length} articles from RSS`);
   }
@@ -500,35 +530,56 @@ async function fetchAllFeeds() {
     rssErrors.forEach((e) => console.log(`    → ${e.source}: ${e.error}`));
   }
 
+  // Merge new articles into the accumulated pool
+  accumulatedArticles = [...newResults, ...accumulatedArticles];
+
+  // Prune articles older than 48 hours from the pool
+  const cutoff48h = new Date(Date.now() - 48 * 60 * 60 * 1000);
+  accumulatedArticles = accumulatedArticles.filter(
+    (a) => new Date(a.pubDate) >= cutoff48h
+  );
+
   // Sort by date, newest first
-  allResults.sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate));
+  accumulatedArticles.sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate));
 
   // Deduplicate by title similarity
   const seen = new Set();
-  const deduped = allResults.filter((item) => {
+  const deduped = accumulatedArticles.filter((item) => {
     const key = item.title.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 40);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
+  accumulatedArticles = deduped; // keep the deduped version
 
-  // Merge curated articles (always on top, never filtered out)
+  // Auto-expire curated articles older than 48 hours
+  const now = new Date();
+  const activeCurated = curatedArticles.filter((a) => {
+    const age = now - new Date(a.pubDate);
+    return age < 48 * 60 * 60 * 1000; // 48 hours in ms
+  });
+  if (activeCurated.length < curatedArticles.length) {
+    const expired = curatedArticles.length - activeCurated.length;
+    console.log(`  🕐 Auto-expired ${expired} curated article(s) (older than 48h)`);
+    curatedArticles = activeCurated;
+  }
+
+  // Merge curated articles (on top, never filtered out)
   newsCache = [...curatedArticles, ...deduped];
   lastFetchTime = new Date().toISOString();
   fetchErrors = errors;
 
   // Step 3: If nothing worked, use seed data
   if (deduped.length === 0) {
-    newsCache = [...SEED_ARTICLES];
+    newsCache = [...curatedArticles, ...SEED_ARTICLES];
     usingSeed = true;
     newsSource = "seed";
     console.log(`  📦 No live news — using ${SEED_ARTICLES.length} seed articles`);
   } else {
     usingSeed = false;
-    // Count today's articles
     const today = new Date().toDateString();
     const todayCount = deduped.filter(a => new Date(a.pubDate).toDateString() === today).length;
-    console.log(`  📊 Total: ${deduped.length} articles (${todayCount} from today)`);
+    console.log(`  📊 Total: ${deduped.length} articles (${todayCount} from today) | Curated: ${curatedArticles.length} active`);
   }
 }
 
@@ -620,12 +671,19 @@ app.get("/api/tags", (req, res) => {
 app.get("/api/status", (req, res) => {
   const today = new Date().toDateString();
   const todayCount = newsCache.filter(a => new Date(a.pubDate).toDateString() === today).length;
+  const creditsUsedEstimate = queryRotationIndex > 0 ? queryRotationIndex : NEWSDATA_QUERIES.length;
   res.json({
     ok: true,
     articleCount: newsCache.length,
     todayCount,
+    curatedCount: curatedArticles.length,
     lastFetched: lastFetchTime,
     newsSource,
+    trustedDomains: TRUSTED_DOMAINS.split(",").length,
+    queryRotation: `${queryRotationIndex}/${NEWSDATA_QUERIES.length}`,
+    queriesPerCycle: QUERIES_PER_CYCLE,
+    refreshInterval: "15 min",
+    estimatedDailyCredits: `~${QUERIES_PER_CYCLE * 96}/day (limit: 200)`,
     feedCount: FEEDS.length,
     feedErrors: fetchErrors.length,
     usingSeedData: usingSeed,
@@ -724,7 +782,7 @@ app.get("/admin", (req, res) => {
 <body>
 <div class="container">
   <h1>InsuralIQ Editor Panel</h1>
-  <p class="subtitle">Add curated insurance news articles to your platform</p>
+  <p class="subtitle">Add curated insurance news · Articles auto-expire after 48 hours</p>
 
   <div id="msg" class="msg"></div>
 
@@ -829,15 +887,19 @@ async function loadCurated() {
       list.innerHTML = '<p>No curated articles yet. Add your first one above!</p>';
       return;
     }
-    list.innerHTML = data.articles.map(a => \`
+    list.innerHTML = data.articles.map(a => {
+      const ageH = Math.round((Date.now() - new Date(a.pubDate).getTime()) / 3600000);
+      const remaining = Math.max(0, 48 - ageH);
+      const expiryText = remaining > 0 ? \`Expires in \${remaining}h\` : 'Expiring soon';
+      return \`
       <div class="existing-item">
         <div>
           <div class="existing-title">\${a.title}</div>
-          <div class="existing-meta">\${a.tag} · \${new Date(a.pubDate).toLocaleDateString()}</div>
+          <div class="existing-meta">\${a.tag} · \${new Date(a.pubDate).toLocaleDateString()} · ⏱ \${expiryText}</div>
         </div>
         <button class="del-btn" onclick="deleteArticle('\${a.id}')">Remove</button>
       </div>
-    \`).join('');
+    \`}).join('');
   } catch(e) {
     document.getElementById('curatedList').innerHTML = '<p>Failed to load.</p>';
   }
@@ -879,12 +941,14 @@ app.listen(PORT, async () => {
   console.log(`  │   GET /api/status   — health check     │`);
   console.log(`  └──────────────────────────────────────┘`);
   console.log(`  📡 NewsData.io API key: ${NEWSDATA_API_KEY ? "✅ Configured" : "❌ Not set (using RSS only)"}`);
-  console.log(`  💡 Set NEWSDATA_API_KEY env var for live daily news\n`);
+  console.log(`  🔒 Trusted domains: ${TRUSTED_DOMAINS.split(",").length} sources`);
+  console.log(`  🔄 Rotation: ${QUERIES_PER_CYCLE} queries per cycle, ${NEWSDATA_QUERIES.length} total`);
+  console.log(`  💰 Est. daily credits: ~${QUERIES_PER_CYCLE * 96} / 200\n`);
 
-  // Initial fetch
+  // Initial fetch on startup
   await fetchAllFeeds();
 
-  // Refresh every 30 minutes (conserves API credits — 200/day free)
-  // 48 requests/day (4 queries × 30-min intervals × ~12 active hours)
-  cron.schedule("*/30 * * * *", fetchAllFeeds);
+  // Refresh every 15 minutes with 2-query rotation
+  // ~192 credits/day (well within 200 limit)
+  cron.schedule("*/15 * * * *", fetchAllFeeds);
 });
